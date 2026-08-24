@@ -66,10 +66,10 @@ curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {nam
         "https://api.github.com/repos/${OWNER}/${repositorio}" | jq -r '.clone_url')
 
     # 1. Clonar el repo de GitLab como espejo
-    git clone --mirror $url_repo_gitlab
-
+    git clone --mirror "$url_repo_gitlab" repositorio.git
+    
     # 2. Entrar en el directorio clonado
-    cd "$repositorio.git"
+    cd repositorio.git
     ls -a
 
     # 3. Cambiar el remote a GitHub
