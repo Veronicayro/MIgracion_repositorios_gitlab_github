@@ -13,12 +13,13 @@ ruta_inicial=$(pwd)
 echo "GROUP_GITLAB recibido: $GROUP_GITLAB"
 echo "OWNER recibido: $OWNER"
 
-if [ -n "$TOKEN_GITLAB" ]; then
-    echo "TOKEN_GITLAB recibido correctamente"
+if [ -z "$GROUP_GITLAB" ]; then
+    URL_GITLAB="https://gitlab.com/api/v4/projects"
 else
-    echo "ERROR: TOKEN_GITLAB no recibido"
-    exit 1
+    URL_GITLAB="https://gitlab.com/api/v4/groups/${GROUP_GITLAB}/projects"
 fi
+
+echo "URL GITLAB: $URL_GITLAB"
 
 if [ -n "$TOKEN_GITHUB" ]; then
     echo "TOKEN_GITHUB recibido correctamente"
@@ -29,7 +30,7 @@ fi
 
 echo "URL GITLAB: $ulr_gitlab"
 #REVISAR DOCUMENTACIÓN POR SI SE NECESITA FILTROS https://docs.gitlab.com/api/projects/
-curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$ulr_gitlab" | jq -c '.[] | {name, http_url_to_repo, description}' | while read -r elemento; do
+curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {name, http_url_to_repo, description}' | while read -r elemento; do
     # Extraer campos de cada elemento
     repositorio=$(echo "$elemento" | jq -r '.name')
     url_repo_gitlab=$(echo "$elemento" | jq -r '.http_url_to_repo')
