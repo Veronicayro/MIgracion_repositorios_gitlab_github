@@ -2,10 +2,6 @@
 
 clear
 
-#echo "El Token para Gitlab es: $TOKEN_GITLAB"
-#echo "El Token para Github es: $TOKEN_GITHUB"
-#echo "La organizacion para Github es: $OWNER"
-
 BUSCAR_GITLAB="gitlab.com"
 BUSCAR_GITHUB="github.com"
 ruta_inicial=$(pwd)
@@ -28,22 +24,22 @@ else
     exit 1
 fi
 
-echo "URL GITLAB: $ulr_gitlab"
-
-# REVISAR DOCUMENTACIÓN POR SI SE NECESITA FILTROS
-# https://docs.gitlab.com/api/projects/
-
 curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" |
 jq -c '.[] | {name, http_url_to_repo, description}' |
 while read -r elemento; do
 
-    # Extraer campos de cada elemento
     repositorio=$(echo "$elemento" | jq -r '.name')
     url_repo_gitlab=$(echo "$elemento" | jq -r '.http_url_to_repo')
     description=$(echo "$elemento" | jq -r '.description')
 
+    echo ""
+    echo "========================================"
+    echo "REPOSITORIO: $repositorio"
+    echo "========================================"
+
     [ -d "./migracion" ] && rm -rf "./migracion"
-    mkdir ./migracion && cd ./migracion
+    mkdir -p ./migracion
+    cd ./migracion
 
     HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" \
         -H "Authorization: token $TOKEN_GITHUB" \
@@ -61,58 +57,128 @@ while read -r elemento; do
 
         echo "EL REPOSITORIO NO EXISTE EN GITHUB Y SE VA CREAR"
 
-        curl -X POST \
+        curl -s -X POST \
             -H "Authorization: token $TOKEN_GITHUB" \
             -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/orgs/$OWNER/repos \
+            "https://api.github.com/orgs/$OWNER/repos" \
             -d "{\"name\":\"$repositorio\", \"description\":\"$description\", \"private\":true}"
 
+        echo ""
         echo "SE CREO EL REPOSITORIO"
 
     fi
 
+    echo ""
     echo "BUSQUEDA DE REPOSITORIO"
 
-    url_repo_github=$(curl \
+    url_repo_github=$(curl -s \
         -H "Authorization: token $TOKEN_GITHUB" \
         -H "Accept: application/vnd.github.v3+json" \
         "https://api.github.com/repos/${OWNER}/${repositorio}" |
         jq -r '.clone_url')
 
-    # 1. Clonar el repositorio de GitLab como espejo
-    # Se utiliza un nombre fijo para evitar depender del "path"
-    # de GitLab.
+    if [ -z "$url_repo_github" ] || [ "$url_repo_github" = "null" ]; then
+        echo "ERROR: No se pudo obtener la URL de GitHub"
+        cd "$ruta_inicial"
+        continue
+    fi
+
+    echo "URL GITHUB OBTENIDA: $url_repo_github"
+
+    # ============================================================
+    # 1. CLONAR GITLAB COMO ESPEJO
+    # ============================================================
+
+    echo ""
     echo "CLONANDO REPOSITORIO DE GITLAB..."
 
     git clone --mirror "$url_repo_gitlab" repositorio.git
 
-    # Validar que el clon se haya creado correctamente
-    if [ ! -d "repositorio.git" ]; then
+    if [ $? -ne 0 ]; then
         echo "ERROR: No se pudo clonar el repositorio de GitLab"
         cd "$ruta_inicial"
         continue
     fi
 
-    # 2. Entrar en el repositorio clonado
+    if [ ! -d "repositorio.git" ]; then
+        echo "ERROR: No existe repositorio.git después del clone"
+        cd "$ruta_inicial"
+        continue
+    fi
+
+    echo "CLON DEL REPOSITORIO CORRECTO"
+
+    # ============================================================
+    # 2. VERIFICAR QUE EL CLON TIENE CONTENIDO
+    # ============================================================
+
+    echo ""
+    echo "VERIFICANDO CONTENIDO DEL REPOSITORIO..."
+
     cd repositorio.git
 
-    echo "REPOSITORIO CLONADO CORRECTAMENTE"
-    ls -a
+    echo "REFERENCIAS OBTENIDAS DESDE GITLAB:"
+    git show-ref
 
-    # 3. Cambiar el remote a GitHub
+    TOTAL_REFS=$(git show-ref | wc -l)
+
+    echo ""
+    echo "TOTAL DE REFERENCIAS: $TOTAL_REFS"
+
+    if [ "$TOTAL_REFS" -eq 0 ]; then
+        echo "ERROR: EL REPOSITORIO DE GITLAB NO TIENE REFERENCIAS"
+        cd "$ruta_inicial"
+        continue
+    fi
+
+    echo "EL CLON CONTIENE REFERENCIAS"
+
+    # ============================================================
+    # 3. CONFIGURAR REMOTE DE GITHUB
+    # ============================================================
+
     REEMPLAZAR="$TOKEN_GITHUB@github.com"
     url_repo_github=${url_repo_github/${BUSCAR_GITHUB}/${REEMPLAZAR}}
 
-    echo "EJECUCION DEL REMOTE"
+    echo ""
+    echo "CONFIGURANDO REMOTE DE GITHUB..."
 
     git remote set-url origin "$url_repo_github"
 
-    # 4. Hacer push de TODO al nuevo destino
-    echo "EJECUCION DEL PUSH"
+    echo ""
+    echo "REMOTE CONFIGURADO:"
+    git remote -v
+
+    # ============================================================
+    # 4. PUSH COMPLETO DEL ESPEJO
+    # ============================================================
+
+    echo ""
+    echo "EJECUCION DEL PUSH --MIRROR"
 
     git push --mirror origin
 
-    # Volver al directorio inicial
+    if [ $? -ne 0 ]; then
+        echo "ERROR: FALLO EL PUSH DEL REPOSITORIO"
+        cd "$ruta_inicial"
+        continue
+    fi
+
+    echo ""
+    echo "PUSH COMPLETADO CORRECTAMENTE"
+
+    # ============================================================
+    # 5. VALIDACION FINAL
+    # ============================================================
+
+    echo ""
+    echo "VALIDANDO REFERENCIAS EN GITHUB..."
+
+    git ls-remote origin
+
+    echo ""
+    echo "MIGRACION FINALIZADA: $repositorio"
+
     cd "$ruta_inicial"
 
 done
