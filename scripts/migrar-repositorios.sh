@@ -1,5 +1,5 @@
 #!/bin/bash
-
+set -e
 clear
 
 #echo "El Token para Gitlab es: $TOKEN_GITLAB"
