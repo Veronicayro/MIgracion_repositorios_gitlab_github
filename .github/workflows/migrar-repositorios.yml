@@ -2,6 +2,16 @@ name: Migrar repositorios GitLab a GitHub
 
 on:
   workflow_dispatch:
+    inputs:
+      group_gitlab:
+        description: "Grupo de GitLab"
+        required: false
+        type: string
+
+      owner:
+        description: "Organización de GitHub"
+        required: true
+        type: string
 
 jobs:
   migrar:
@@ -20,4 +30,9 @@ jobs:
         run: chmod +x scripts/migrar-repositorios.sh
 
       - name: Ejecutar migración
+        env:
+          TOKEN_GITLAB: ${{ secrets.TOKEN_GITLAB }}
+          GROUP_GITLAB: ${{ inputs.group_gitlab }}
+          TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
+          OWNER: ${{ inputs.owner }}
         run: ./scripts/migrar-repositorios.sh
