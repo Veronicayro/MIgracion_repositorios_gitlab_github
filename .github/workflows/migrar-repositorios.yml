@@ -1,4 +1,4 @@
-name: Migrar repositorios GitLab a GitHub
+name: Migrar y validar repositorios GitLab a GitHub
 
 on:
   workflow_dispatch:
@@ -26,8 +26,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq
 
-      - name: Dar permisos al script
-        run: chmod +x scripts/migrar-repositorios.sh
+      - name: Dar permisos a los scripts
+        run: |
+          chmod +x scripts/migrar-repositorios.sh
+          chmod +x scripts/validar-integridad-migracion.sh
 
       - name: Ejecutar migración
         env:
@@ -36,3 +38,11 @@ jobs:
           TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
           OWNER: ${{ inputs.owner }}
         run: ./scripts/migrar-repositorios.sh
+
+      - name: Ejecutar validación de integridad
+        env:
+          TOKEN_GITLAB: ${{ secrets.TOKEN_GITLAB }}
+          GROUP_GITLAB: ${{ inputs.group_gitlab }}
+          TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
+          OWNER: ${{ inputs.owner }}
+        run: ./scripts/validar-integridad-migracion.sh
