@@ -1,1 +1,23 @@
+name: Migrar repositorios GitLab a GitHub
 
+on:
+  workflow_dispatch:
+
+jobs:
+  migrar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Dar permisos al script
+        run: chmod +x scripts/migrar-repositorios.sh
+
+      - name: Ejecutar migración
+        run: ./scripts/migrar-repositorios.sh
