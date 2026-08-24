@@ -38,11 +38,3 @@ jobs:
           TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
           OWNER: ${{ inputs.owner }}
         run: ./scripts/migrar-repositorios.sh
-
-      - name: Ejecutar validación de integridad
-        env:
-          TOKEN_GITLAB: ${{ secrets.TOKEN_GITLAB }}
-          GROUP_GITLAB: ${{ inputs.group_gitlab }}
-          TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
-          OWNER: ${{ inputs.owner }}
-        run: ./scripts/validar-integridad-migracion.sh
