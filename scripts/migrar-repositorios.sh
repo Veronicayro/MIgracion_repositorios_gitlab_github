@@ -6,7 +6,7 @@ clear
 #echo "El Token para Github es: $TOKEN_GITHUB"
 #echo "La organizacion para Github es: $OWNER"
 
-BUSCAR_GITLAB="localhost"
+BUSCAR_GITLAB="gitlab.com"
 BUSCAR_GITHUB="github.com"
 ruta_inicial=$(pwd)
 
@@ -43,7 +43,7 @@ curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$ulr_gitlab" | jq -c '.[] | {nam
         -H "Accept: application/vnd.github.v3+json" \
         "https://api.github.com/repos/${OWNER}/${repositorio}")
 
-    REEMPLAZAR="root:$TOKEN_GITLAB@localhost:8080"
+    REEMPLAZAR="oauth2:$TOKEN_GITLAB@gitlab.com"
     url_repo_gitlab=${url_repo_gitlab/${BUSCAR_GITLAB}/${REEMPLAZAR}}
     
     if [[ "$HTTP_CODE" == "200" ]]; then
