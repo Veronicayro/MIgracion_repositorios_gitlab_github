@@ -28,7 +28,7 @@ else
     exit 1
 fi
 
-echo "URL GITLAB: $ulr_gitlab"
+echo "URL GITLAB: $URL_GITLAB"
 #REVISAR DOCUMENTACIÓN POR SI SE NECESITA FILTROS https://docs.gitlab.com/api/projects/
 curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {name, path, http_url_to_repo, description}' | while read -r elemento; do
     # Extraer campos de cada elemento
@@ -43,7 +43,7 @@ curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {nam
     HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" \
         -H "Authorization: token $TOKEN_GITHUB" \
         -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/${OWNER}/${path_repo}"
+        "https://api.github.com/repos/${OWNER}/${path_repo}")
 
     REEMPLAZAR="oauth2:$TOKEN_GITLAB@gitlab.com"
     url_repo_gitlab=${url_repo_gitlab/${BUSCAR_GITLAB}/${REEMPLAZAR}}
@@ -67,7 +67,7 @@ curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {nam
         "https://api.github.com/repos/${OWNER}/${path_repo}" | jq -r '.clone_url')
 
     # 1. Clonar el repo de GitLab como espejo
-    git clone --mirror $url_repo_gitlab
+    git clone --mirror "$url_repo_gitlab"
     echo "VERIFICANDO CLON DEL REPOSITORIO..."
     git --git-dir="$path_repo.git" rev-parse --is-bare-repository
     echo "REFERENCIAS EN GITLAB:"
@@ -84,7 +84,7 @@ curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {nam
     #https://github.com/prmrOrganizacion2/segundo-proyecto    
     #git remote set-url origin https://github.com/user/repo2.git
     echo "EJECUCION DEL REMOTE"
-    git remote set-url origin $url_repo_github
+    git remote set-url origin "$url_repo_github"
 
     # 4. Hacer push de todo al nuevo destino
     echo "EJECUCION DEL PUSH"
