@@ -5,14 +5,26 @@ clear
 #echo "El Token para Gitlab es: $TOKEN_GITLAB"
 #echo "El Token para Github es: $TOKEN_GITHUB"
 #echo "La organizacion para Github es: $OWNER"
+
 BUSCAR_GITLAB="localhost"
 BUSCAR_GITHUB="github.com"
 ruta_inicial=$(pwd)
 
-if [ -z "$GROUP_GITLAB" ]; then
-    ulr_gitlab="https://gitlab.com/api/v4/projects"
+echo "GROUP_GITLAB recibido: $GROUP_GITLAB"
+echo "OWNER recibido: $OWNER"
+
+if [ -n "$TOKEN_GITLAB" ]; then
+    echo "TOKEN_GITLAB recibido correctamente"
 else
-    ulr_gitlab="https://gitlab.com/api/v4/groups/$GROUP_GITLAB/projects"
+    echo "ERROR: TOKEN_GITLAB no recibido"
+    exit 1
+fi
+
+if [ -n "$TOKEN_GITHUB" ]; then
+    echo "TOKEN_GITHUB recibido correctamente"
+else
+    echo "ERROR: TOKEN_GITHUB no recibido"
+    exit 1
 fi
 
 
