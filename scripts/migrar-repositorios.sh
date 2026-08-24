@@ -30,9 +30,10 @@ fi
 
 echo "URL GITLAB: $ulr_gitlab"
 #REVISAR DOCUMENTACIÓN POR SI SE NECESITA FILTROS https://docs.gitlab.com/api/projects/
-curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {name, http_url_to_repo, description}' | while read -r elemento; do
+curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {name, path, http_url_to_repo, description}' | while read -r elemento; do
     # Extraer campos de cada elemento
-    repositorio=$(echo "$elemento" | jq -r '.name')
+    nombre_repo=$(echo "$elemento" | jq -r '.name')
+    path_repo=$(echo "$elemento" | jq -r '.path')
     url_repo_gitlab=$(echo "$elemento" | jq -r '.http_url_to_repo')
     description=$(echo "$elemento" | jq -r '.description')
 
