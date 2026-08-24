@@ -1,9 +1,7 @@
 #!/bin/bash
 
-clear
-
 BUSCAR_GITLAB="gitlab.com"
-BUSCAR_GITHUB="github.com"
+ruta_inicial=$(pwd)
 
 echo "========================================"
 echo "VALIDACION DE MIGRACION GITLAB -> GITHUB"
@@ -30,18 +28,29 @@ if [ -z "$TOKEN_GITHUB" ]; then
     exit 1
 fi
 
-TOTAL=0
-EXITOSOS=0
-ERRORES=0
+if [ -z "$OWNER" ]; then
+    echo "ERROR: OWNER no recibido"
+    exit 1
+fi
 
 [ -d "./validacion" ] && rm -rf "./validacion"
 mkdir -p "./validacion"
 
-curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" |
+cd "./validacion" || exit 1
+
+repositorios_evaluados=0
+repositorios_correctos=0
+repositorios_error=0
+
+echo ""
+echo "OBTENIENDO REPOSITORIOS DE GITLAB..."
+echo ""
+
+curl --fail --silent --show-error \
+    --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" \
+    "$URL_GITLAB" |
 jq -c '.[] | {name, path, http_url_to_repo}' |
 while read -r elemento; do
-
-    TOTAL=$((TOTAL + 1))
 
     nombre_repo=$(echo "$elemento" | jq -r '.name')
     path_repo=$(echo "$elemento" | jq -r '.path')
@@ -52,204 +61,237 @@ while read -r elemento; do
     echo "REPOSITORIO: $nombre_repo"
     echo "========================================"
 
-    resultado=0
+    echo "GitLab name : $nombre_repo"
+    echo "GitLab path : $path_repo"
 
-    REEMPLAZAR="oauth2:$TOKEN_GITLAB@gitlab.com"
-    url_repo_gitlab=${url_repo_gitlab/${BUSCAR_GITLAB}/${REEMPLAZAR}}
-
-    URL_GITHUB="https://github.com/${OWNER}/${nombre_repo}.git"
-
-    echo "GitLab : $url_repo_gitlab"
-    echo "GitHub : $URL_GITHUB"
-
-    [ -d "./validacion/$path_repo.git" ] && rm -rf "./validacion/$path_repo.git"
+    # ---------------------------------------------------------
+    # IMPORTANTE:
+    # GitHub se busca utilizando NAME, no PATH
+    # ---------------------------------------------------------
 
     echo ""
-    echo "[1] OBTENIENDO REPOSITORIO DE GITLAB..."
+    echo "[1] BUSCANDO REPOSITORIO EN GITHUB..."
 
-    git clone --mirror "$url_repo_gitlab" "./validacion/$path_repo.git" >/dev/null 2>&1
+    HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" \
+        -H "Authorization: token $TOKEN_GITHUB" \
+        -H "Accept: application/vnd.github.v3+json" \
+        "https://api.github.com/repos/${OWNER}/${nombre_repo}")
 
-    if [ $? -ne 0 ]; then
-        echo "ERROR: No se pudo clonar el repositorio de GitLab"
-        ERRORES=$((ERRORES + 1))
+    if [ "$HTTP_CODE" != "200" ]; then
+        echo "ERROR: El repositorio no existe o no se puede acceder en GitHub"
+        echo "GitHub esperado: ${OWNER}/${nombre_repo}"
+        echo "HTTP CODE: $HTTP_CODE"
+        repositorios_error=$((repositorios_error + 1))
         continue
     fi
 
-    GITLAB_DIR="./validacion/$path_repo.git"
+    echo "Repositorio encontrado en GitHub:"
+    echo "https://github.com/${OWNER}/${nombre_repo}"
 
-    REEMPLAZAR="$TOKEN_GITHUB@github.com"
-    URL_GITHUB_AUTH=${URL_GITHUB/${BUSCAR_GITHUB}/${REEMPLAZAR}}
+    # ---------------------------------------------------------
+    # URLs autenticadas
+    # ---------------------------------------------------------
+
+    url_repo_gitlab_auth=${url_repo_gitlab/${BUSCAR_GITLAB}/oauth2:$TOKEN_GITLAB@$BUSCAR_GITLAB}
+
+    url_repo_github="https://x-access-token:${TOKEN_GITHUB}@github.com/${OWNER}/${nombre_repo}.git"
+
+    # ---------------------------------------------------------
+    # CLONAR GITLAB
+    # ---------------------------------------------------------
 
     echo ""
-    echo "[2] VALIDANDO REPOSITORIO DE GITHUB..."
+    echo "[2] CLONANDO REPOSITORIO DE GITLAB..."
 
-    git ls-remote "$URL_GITHUB_AUTH" > "./validacion/github_refs.tmp" 2>/dev/null
+    rm -rf gitlab.git github.git
 
-    if [ $? -ne 0 ]; then
-        echo "ERROR: No se pudo acceder al repositorio de GitHub"
-        resultado=1
-    else
-
-        echo ""
-        echo "[3] VALIDANDO BRANCHES..."
-
-        git --git-dir="$GITLAB_DIR" for-each-ref \
-            --format='%(objectname) %(refname)' \
-            'refs/heads/*' | sort > "./validacion/gitlab_branches.tmp"
-
-        grep 'refs/heads/' "./validacion/github_refs.tmp" |
-            sort > "./validacion/github_branches.tmp"
-
-        if diff -w \
-            "./validacion/gitlab_branches.tmp" \
-            "./validacion/github_branches.tmp" >/dev/null 2>&1; then
-
-            echo "Branches: OK"
-        else
-
-            echo "Branches: ERROR"
-            echo "Diferencias encontradas:"
-            diff -u \
-                "./validacion/gitlab_branches.tmp" \
-                "./validacion/github_branches.tmp"
-
-            resultado=1
-        fi
-
-        echo ""
-        echo "[4] VALIDANDO TAGS..."
-
-        git --git-dir="$GITLAB_DIR" for-each-ref \
-            --format='%(objectname) %(refname)' \
-            'refs/tags/*' | sort > "./validacion/gitlab_tags.tmp"
-
-        grep 'refs/tags/' "./validacion/github_refs.tmp" |
-            sort > "./validacion/github_tags.tmp"
-
-        if diff -w \
-            "./validacion/gitlab_tags.tmp" \
-            "./validacion/github_tags.tmp" >/dev/null 2>&1; then
-
-            echo "Tags: OK"
-        else
-
-            echo "Tags: ERROR"
-            echo "Diferencias encontradas:"
-            diff -u \
-                "./validacion/gitlab_tags.tmp" \
-                "./validacion/github_tags.tmp"
-
-            resultado=1
-        fi
-
-        echo ""
-        echo "[5] VALIDANDO HISTORIAL COMPLETO DE COMMITS..."
-
-        git --git-dir="$GITLAB_DIR" rev-list --all --objects |
-            sort > "./validacion/gitlab_objects.tmp"
-
-        git --git-dir="$GITLAB_DIR" rev-list --all |
-            sort > "./validacion/gitlab_commits.tmp"
-
-        git ls-remote "$URL_GITHUB_AUTH" |
-            awk '{print $1}' > "./validacion/github_refs_sha.tmp"
-
-        git clone --mirror "$URL_GITHUB_AUTH" "./validacion/github_temp.git" \
-            >/dev/null 2>&1
-
-        if [ $? -ne 0 ]; then
-
-            echo "Historial: ERROR"
-            resultado=1
-
-        else
-
-            git --git-dir="./validacion/github_temp.git" rev-list --all |
-                sort > "./validacion/github_commits.tmp"
-
-            if diff -w \
-                "./validacion/gitlab_commits.tmp" \
-                "./validacion/github_commits.tmp" >/dev/null 2>&1; then
-
-                echo "Historial completo: OK"
-            else
-
-                echo "Historial completo: ERROR"
-                resultado=1
-            fi
-
-            rm -rf "./validacion/github_temp.git"
-        fi
-
-        echo ""
-        echo "[6] VALIDANDO AUTORES Y FECHAS DE COMMITS..."
-
-        git --git-dir="$GITLAB_DIR" rev-list --all |
-        while read -r commit; do
-
-            git --git-dir="$GITLAB_DIR" show -s \
-                --format='%H|%an|%ae|%aI|%cn|%ce|%cI' "$commit"
-
-        done | sort > "./validacion/gitlab_commit_metadata.tmp"
-
-        git clone --mirror "$URL_GITHUB_AUTH" "./validacion/github_temp.git" \
-            >/dev/null 2>&1
-
-        if [ $? -eq 0 ]; then
-
-            git --git-dir="./validacion/github_temp.git" rev-list --all |
-            while read -r commit; do
-
-                git --git-dir="./validacion/github_temp.git" show -s \
-                    --format='%H|%an|%ae|%aI|%cn|%ce|%cI' "$commit"
-
-            done | sort > "./validacion/github_commit_metadata.tmp"
-
-            if diff -w \
-                "./validacion/gitlab_commit_metadata.tmp" \
-                "./validacion/github_commit_metadata.tmp" >/dev/null 2>&1; then
-
-                echo "Autores y fechas: OK"
-            else
-
-                echo "Autores y fechas: ERROR"
-                resultado=1
-            fi
-
-            rm -rf "./validacion/github_temp.git"
-
-        else
-
-            echo "Autores y fechas: ERROR"
-            resultado=1
-        fi
+    if ! git clone --mirror "$url_repo_gitlab_auth" gitlab.git >/dev/null 2>&1; then
+        echo "ERROR: No se pudo clonar el repositorio de GitLab"
+        repositorios_error=$((repositorios_error + 1))
+        continue
     fi
 
-    if [ "$resultado" -eq 0 ]; then
+    # ---------------------------------------------------------
+    # CLONAR GITHUB
+    # ---------------------------------------------------------
+
+    echo "[3] CLONANDO REPOSITORIO DE GITHUB..."
+
+    if ! git clone --mirror "$url_repo_github" github.git >/dev/null 2>&1; then
+        echo "ERROR: No se pudo clonar el repositorio de GitHub"
+        repositorios_error=$((repositorios_error + 1))
+        continue
+    fi
+
+    # ---------------------------------------------------------
+    # VALIDAR BRANCHES
+    # ---------------------------------------------------------
+
+    echo ""
+    echo "[4] VALIDANDO BRANCHES..."
+
+    branches_gitlab=$(git --git-dir=gitlab.git for-each-ref \
+        --format='%(refname:strip=2)' refs/heads/ |
+        sort)
+
+    branches_github=$(git --git-dir=github.git for-each-ref \
+        --format='%(refname:strip=2)' refs/heads/ |
+        sort)
+
+    if diff -u <(echo "$branches_gitlab") <(echo "$branches_github") >/dev/null; then
+        echo "BRANCHES: OK"
+        branches_ok=true
+    else
+        echo "BRANCHES: ERROR"
+        echo "Diferencias:"
+        diff -u <(echo "$branches_gitlab") <(echo "$branches_github")
+        branches_ok=false
+    fi
+
+    # ---------------------------------------------------------
+    # VALIDAR TAGS
+    # ---------------------------------------------------------
+
+    echo ""
+    echo "[5] VALIDANDO TAGS..."
+
+    tags_gitlab=$(git --git-dir=gitlab.git for-each-ref \
+        --format='%(refname:strip=2) %(objectname)' refs/tags/ |
+        sort)
+
+    tags_github=$(git --git-dir=github.git for-each-ref \
+        --format='%(refname:strip=2) %(objectname)' refs/tags/ |
+        sort)
+
+    if diff -u <(echo "$tags_gitlab") <(echo "$tags_github") >/dev/null; then
+        echo "TAGS: OK"
+        tags_ok=true
+    else
+        echo "TAGS: ERROR"
+        echo "Diferencias:"
+        diff -u <(echo "$tags_gitlab") <(echo "$tags_github")
+        tags_ok=false
+    fi
+
+    # ---------------------------------------------------------
+    # VALIDAR HISTORIAL DE COMMITS
+    # ---------------------------------------------------------
+
+    echo ""
+    echo "[6] VALIDANDO HISTORIAL DE COMMITS..."
+
+    commits_gitlab=$(git --git-dir=gitlab.git rev-list --all | sort)
+    commits_github=$(git --git-dir=github.git rev-list --all | sort)
+
+    if diff -u <(echo "$commits_gitlab") <(echo "$commits_github") >/dev/null; then
+        echo "HISTORIAL DE COMMITS: OK"
+        commits_ok=true
+    else
+        echo "HISTORIAL DE COMMITS: ERROR"
+        commits_ok=false
+
+        echo "Commits que no coinciden:"
+        diff -u <(echo "$commits_gitlab") <(echo "$commits_github") | head -100
+    fi
+
+    # ---------------------------------------------------------
+    # VALIDAR CONTENIDO / ESTRUCTURA
+    # ---------------------------------------------------------
+
+    echo ""
+    echo "[7] VALIDANDO CONTENIDO DEL REPOSITORIO..."
+
+    contenido_gitlab=$(mktemp)
+    contenido_github=$(mktemp)
+
+    git --git-dir=gitlab.git ls-tree -r --full-tree HEAD \
+        2>/dev/null |
+        awk '{$1=""; $2=""; sub(/^  /,""); print}' |
+        sort > "$contenido_gitlab"
+
+    git --git-dir=github.git ls-tree -r --full-tree HEAD \
+        2>/dev/null |
+        awk '{$1=""; $2=""; sub(/^  /,""); print}' |
+        sort > "$contenido_github"
+
+    if diff -u "$contenido_gitlab" "$contenido_github" >/dev/null; then
+        echo "CONTENIDO / ESTRUCTURA: OK"
+        contenido_ok=true
+    else
+        echo "CONTENIDO / ESTRUCTURA: ERROR"
+        echo "Diferencias encontradas:"
+        diff -u "$contenido_gitlab" "$contenido_github" | head -100
+        contenido_ok=false
+    fi
+
+    rm -f "$contenido_gitlab" "$contenido_github"
+
+    # ---------------------------------------------------------
+    # VALIDAR INTEGRIDAD COMPLETA DE LOS OBJETOS GIT
+    # ---------------------------------------------------------
+
+    echo ""
+    echo "[8] VALIDANDO INTEGRIDAD DE OBJETOS GIT..."
+
+    objetos_gitlab=$(git --git-dir=gitlab.git rev-list --objects --all | sort)
+    objetos_github=$(git --git-dir=github.git rev-list --objects --all | sort)
+
+    if diff -u <(echo "$objetos_gitlab") <(echo "$objetos_github") >/dev/null; then
+        echo "OBJETOS GIT: OK"
+        objetos_ok=true
+    else
+        echo "OBJETOS GIT: ERROR"
+        objetos_ok=false
+    fi
+
+    # ---------------------------------------------------------
+    # RESULTADO DEL REPOSITORIO
+    # ---------------------------------------------------------
+
+    repositorios_evaluados=$((repositorios_evaluados + 1))
+
+    if [ "$branches_ok" = true ] &&
+       [ "$tags_ok" = true ] &&
+       [ "$commits_ok" = true ] &&
+       [ "$contenido_ok" = true ] &&
+       [ "$objetos_ok" = true ]; then
+
         echo ""
         echo "RESULTADO: OK"
-        EXITOSOS=$((EXITOSOS + 1))
+        repositorios_correctos=$((repositorios_correctos + 1))
+
     else
+
         echo ""
         echo "RESULTADO: ERROR"
-        ERRORES=$((ERRORES + 1))
+        repositorios_error=$((repositorios_error + 1))
+
     fi
 
-    rm -f ./validacion/*.tmp
-    rm -rf "$GITLAB_DIR"
+    rm -rf gitlab.git github.git
 
 done
+
+cd "$ruta_inicial" || exit 1
 
 echo ""
 echo "========================================"
 echo "RESUMEN DE VALIDACION"
 echo "========================================"
-echo "Repositorios evaluados : $TOTAL"
-echo "Repositorios correctos : $EXITOSOS"
-echo "Repositorios con error  : $ERRORES"
+
+echo "Repositorios evaluados : $repositorios_evaluados"
+echo "Repositorios correctos : $repositorios_correctos"
+echo "Repositorios con error : $repositorios_error"
+
 echo "========================================"
 
-if [ "$ERRORES" -eq 0 ]; then
+if [ "$repositorios_evaluados" -eq 0 ]; then
+    echo "RESULTADO FINAL: ERROR"
+    echo "No se pudo validar ningún repositorio."
+    exit 1
+fi
+
+if [ "$repositorios_error" -eq 0 ]; then
     echo "RESULTADO FINAL: VALIDACION EXITOSA"
     exit 0
 else
