@@ -67,6 +67,10 @@ curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {nam
 
     # 1. Clonar el repo de GitLab como espejo
     git clone --mirror $url_repo_gitlab
+    echo "VERIFICANDO CLON DEL REPOSITORIO..."
+    git --git-dir="$repositorio.git" rev-parse --is-bare-repository
+    echo "REFERENCIAS EN GITLAB:"
+    git --git-dir="$repositorio.git" show-ref
 
     # 2. Entrar en el directorio clonado
     cd "$repositorio.git"
