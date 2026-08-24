@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-clear
+
 
 #echo "El Token para Gitlab es: $TOKEN_GITLAB"
 #echo "El Token para Github es: $TOKEN_GITHUB"
