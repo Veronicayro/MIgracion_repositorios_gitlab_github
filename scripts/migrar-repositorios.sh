@@ -2,10 +2,6 @@
 
 clear
 
-read -p "Por favor, introduce el valor del token para gitlab: " TOKEN_GITLAB
-read -p "Si desea repositorios de un grupo especifico ingresar el nombre aqui: " GROUP_GITLAB
-read -p "Por favor, introduce el valor del token para github: " TOKEN_GITHUB
-read -p "Por favor, introduce el valor de la organizacion para github: " OWNER
 #echo "El Token para Gitlab es: $TOKEN_GITLAB"
 #echo "El Token para Github es: $TOKEN_GITHUB"
 #echo "La organizacion para Github es: $OWNER"
