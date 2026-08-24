@@ -43,7 +43,7 @@ curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {nam
     HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" \
         -H "Authorization: token $TOKEN_GITHUB" \
         -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/${OWNER}/${repositorio}")
+        "https://api.github.com/repos/${OWNER}/${nombre_repo}"
 
     REEMPLAZAR="oauth2:$TOKEN_GITLAB@gitlab.com"
     url_repo_gitlab=${url_repo_gitlab/${BUSCAR_GITLAB}/${REEMPLAZAR}}
@@ -56,7 +56,7 @@ curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {nam
             -H "Authorization: token $TOKEN_GITHUB" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/orgs/$OWNER/repos \
-            -d "{\"name\":\"$repositorio\", \"description\":\"$description\", \"private\":true}"
+            -d "{\"name\":\"$nombre_repo\", \"description\":\"$description\", \"private\":true}"
 
         echo "SE CREO EL REPOSITORIO"
     fi
@@ -64,7 +64,7 @@ curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {nam
     echo "BUSQUEDA DE REPOSITORIO"
     url_repo_github=$(curl -H "Authorization: token $TOKEN_GITHUB" \
         -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/${OWNER}/${repositorio}" | jq -r '.clone_url')
+        "https://api.github.com/repos/${OWNER}/${nombre_repo}"" | jq -r '.clone_url')
 
     # 1. Clonar el repo de GitLab como espejo
     git clone --mirror $url_repo_gitlab
@@ -74,7 +74,7 @@ curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$URL_GITLAB" | jq -c '.[] | {nam
     git --git-dir="$repositorio.git" show-ref
 
     # 2. Entrar en el directorio clonado
-    cd "$repositorio.git"
+    cd "$path_repo.git"
     ls -a
 
     # 3. Cambiar el remote a GitHub
