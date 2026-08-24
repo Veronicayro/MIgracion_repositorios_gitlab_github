@@ -27,7 +27,7 @@ else
     exit 1
 fi
 
-
+echo "URL GITLAB: $ulr_gitlab"
 #REVISAR DOCUMENTACIÓN POR SI SE NECESITA FILTROS https://docs.gitlab.com/api/projects/
 curl --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}" "$ulr_gitlab" | jq -c '.[] | {name, http_url_to_repo, description}' | while read -r elemento; do
     # Extraer campos de cada elemento
