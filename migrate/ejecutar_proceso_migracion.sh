@@ -4,6 +4,8 @@
 
 main() {
   echo "MENSAJE INICIAL"
+  
+  return 0
 }
 
 main "$@"
