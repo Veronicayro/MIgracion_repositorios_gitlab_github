@@ -1,0 +1,44 @@
+name: Migrar repositorios
+
+on:
+  workflow_dispatch:
+    inputs:
+      organizacion_github:
+        description: "Organización Github"
+        required: true
+        type: string
+
+      grupo_gitlab:
+        description: "Grupo Gitlab"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  migrar:
+    name: Ejecutar migración de repositorios
+    runs-on: ubuntu-latest
+
+    # Todas estas variables estarán disponibles para los tres scripts.
+    env:
+      # Variables recibidas desde Port
+      GROUP_GITLAB: ${{ inputs.grupo_gitlab }}
+      OWNER: ${{ inputs.organizacion_github }}
+
+      # Variables de configuración del repositorio en GitHub:
+      # Settings > Secrets and variables > Actions > Variables
+      TOKEN_GITHUB: ${{ vars.TOKEN_GITHUB }}
+      TOKEN_GITLAB: ${{ vars.TOKEN_GITLAB }}
+
+    steps:
+      - name: Descargar código del repositorio
+        uses: actions/checkout@v4
+
+      - name: Ejecutar migración
+        shell: bash
+        run: |
+          chmod +x migrate/ejecutar_proceso_migracion.sh
+          ./migrate/ejecutar_proceso_migracion.sh
+
