@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Informar éxito a Port
-        if: ${{ needs.validate.result == 'success' && needs.create.result == 'success' }}
+        if: ${{ needs.migrar.result == 'success' }}
         uses: port-labs/port-github-action@v1
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID_ORG }}
@@ -64,11 +64,11 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           status: SUCCESS
-          logMessage: Proyecto Playwright creado correctamente
+          logMessage: El Proceso de Migración Realizada Correctamente (revisar el log para ver detalles importantes)
           link: '["${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"]'
 
       - name: Informar fallo a Port
-        if: ${{ needs.validate.result != 'success' || needs.create.result != 'success' }}
+        if: ${{ needs.migrar.result != 'success' }}
         uses: port-labs/port-github-action@v1
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID_ORG }}
@@ -77,5 +77,5 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           status: FAILURE
-          logMessage: Falló la creación del proyecto Playwright
+          logMessage: El Proceso de Migración tuvo varios errores (revisar el log para ver los detalles)
           link: '["${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"]'
