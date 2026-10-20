@@ -13,6 +13,11 @@ on:
         required: false
         type: string
 
+      port_run_id:
+        description: ID de la ejecución en Port
+        required: false
+        type: string
+
 permissions:
   contents: read
 
