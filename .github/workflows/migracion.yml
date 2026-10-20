@@ -47,3 +47,35 @@ jobs:
           chmod +x migrate/ejecutar_proceso_migracion.sh
           ./migrate/ejecutar_proceso_migracion.sh
 
+
+  report:
+    name: Informar a Port
+    needs: [migrar]
+    if: always() && inputs.port_run_id != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Informar éxito a Port
+        if: ${{ needs.validate.result == 'success' && needs.create.result == 'success' }}
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: Proyecto Playwright creado correctamente
+          link: '["${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"]'
+
+      - name: Informar fallo a Port
+        if: ${{ needs.validate.result != 'success' || needs.create.result != 'success' }}
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: FAILURE
+          logMessage: Falló la creación del proyecto Playwright
+          link: '["${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"]'
