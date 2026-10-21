@@ -1,72 +1,35 @@
 #!/usr/bin/env bash
 #
-# migrar_gitlab_github_completo.sh
+# migrar_repositorios.sh
 #
 # Migración GitLab -> GitHub:
 #   - Repositorios Git: ramas y tags.
-#   - Selección por archivo, grupo o todos los proyectos visibles.
+#   - Selección por variable REPOSITORIES_FILE o GROUP_GITLAB.
 #   - Variables y Secrets GitLab.
 #   - GitHub Environments para environment_scope GitLab.
 #   - Branch Protection Rules básicas.
-#   - Miembros del repositorio mediante archivo de equivalencias.
+#   - Miembros del repositorio.
 #   - Análisis, preservación o migración Git LFS.
 #   - Auditoría y migración de pipelines mediante GitHub Actions Importer.
+#
+# REPOSITORIES_FILE:
+#   Variable opcional con proyectos GitLab separados por coma.
+#   Tiene prioridad sobre GROUP_GITLAB.
+#
+# Ejemplo:
+#   export REPOSITORIES_FILE="grupo/proyecto-api,grupo/proyecto-web,123"
+#
+# Cada elemento puede ser:
+#   - path_with_namespace: grupo/subgrupo/proyecto
+#   - ID numérico GitLab: 123
 #
 # Requisitos base:
 #   bash, curl, jq, git, mktemp, awk, sed, sort, tee
 #
 # Requisitos opcionales:
-#   gh                  Para variables, Environments y miembros GitHub.
+#   gh                  Para variables, Environments y pipelines.
 #   git-lfs             Para LFS_MODE=preserve o LFS_MODE=migrate.
 #   gh actions-importer Para MIGRATE_PIPELINES=true.
-#
-# Variables obligatorias:
-#   GITLAB_URL
-#   TOKEN_GITLAB
-#   OWNER
-#   TOKEN_GITHUB
-#
-# Selección:
-#   REPOSITORIES_FILE tiene prioridad sobre GROUP_GITLAB.
-#
-# REPOSITORIES_FILE:
-#   Un proyecto GitLab por línea usando path_with_namespace o ID.
-#
-# Ejemplo:
-#   nexo-personas/web/nexo-personas
-#   grupo/subgrupo/proyecto-api
-#   123
-#
-# Environment mapping opcional:
-#   ENVIRONMENT_MAPPING_FILE="./environment-mapping.tsv"
-#
-# Formato:
-#   gitlab_scope|github_environment|allowed_branches
-#
-# Ejemplo:
-#   dev|dev|dev
-#   qa|qa|qa
-#   production|production|main
-#
-# Formato:
-#   gitlab_username|github_username|github_permission
-#
-# Ejemplo:
-#   usuario_gitlab|usuario_github|maintain
-#   developer01|developer01|push
-#
-# LFS:
-#   LFS_MODE=off|report|preserve|migrate
-#
-#   off      No analiza ni procesa LFS.
-#   report   Reporta blobs grandes, sin modificar historial.
-#   preserve Copia objetos LFS existentes desde GitLab hacia GitHub.
-#   migrate  Convierte patrones definidos en LFS_INCLUDE_PATTERNS a Git LFS.
-#
-# IMPORTANTE:
-#   LFS_MODE=migrate reescribe el historial Git y cambia hashes SHA.
-#   Solo se permite si ALLOW_HISTORY_REWRITE=true y el repo GitHub fue
-#   creado durante esta misma ejecución.
 #
 
 set -Eeuo pipefail
@@ -79,21 +42,18 @@ readonly START_TIME="$(date '+%Y-%m-%d %H:%M:%S')"
 GITLAB_URL="${GITLAB_URL:-}"
 TOKEN_GITLAB="${TOKEN_GITLAB:-}"
 GROUP_GITLAB="${GROUP_GITLAB:-}"
+
+# Lista separada por coma. No es un path de archivo externo.
 REPOSITORIES_FILE="${REPOSITORIES_FILE:-}"
+PROJECT_SELECTION_FILE=""
 
 OWNER="${OWNER:-}"
 TOKEN_GITHUB="${TOKEN_GITHUB:-}"
 GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
 
-PRIVATE_REPOSITORIES="${PRIVATE_REPOSITORIES:-true}"
 ALLOW_MIRROR_OVERWRITE="${ALLOW_MIRROR_OVERWRITE:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 SYNC_DEFAULT_BRANCH="${SYNC_DEFAULT_BRANCH:-true}"
-
-GITLAB_HOST_HEADER="${GITLAB_HOST_HEADER:-}"
-GITLAB_CURL_NO_PROXY="${GITLAB_CURL_NO_PROXY:-false}"
-GITLAB_GIT_BASE_URL="${GITLAB_GIT_BASE_URL:-}"
-GITLAB_GIT_EXTRA_HEADER="${GITLAB_GIT_EXTRA_HEADER:-}"
 
 MIGRATE_VARIABLES="${MIGRATE_VARIABLES:-false}"
 VARIABLES_REQUIRED="${VARIABLES_REQUIRED:-false}"
@@ -110,6 +70,10 @@ BRANCH_PROTECTIONS_REQUIRED="${BRANCH_PROTECTIONS_REQUIRED:-false}"
 MIGRATE_REPOSITORY_MEMBERS="${MIGRATE_REPOSITORY_MEMBERS:-false}"
 MEMBERS_REQUIRED="${MEMBERS_REQUIRED:-false}"
 ALLOW_GITHUB_ADMIN_PERMISSION="${ALLOW_GITHUB_ADMIN_PERMISSION:-false}"
+
+# Sufijo corporativo aplicado al username GitLab para buscar GitHub.
+# Ejemplo: jperez -> jperez_bexca
+GITHUB_USERNAME_SUFFIX="${GITHUB_USERNAME_SUFFIX:-_bexca}"
 
 LFS_MODE="${LFS_MODE:-report}"
 LFS_THRESHOLD_MB="${LFS_THRESHOLD_MB:-50}"
@@ -128,7 +92,6 @@ LOG_DIRECTORY="${LOG_DIRECTORY:-$(pwd)/logs}"
 LOG_FILE="${LOG_FILE:-${LOG_DIRECTORY}/migracion-$(date +%Y%m%d-%H%M%S).log}"
 PIPELINE_REPORT_DIRECTORY="${PIPELINE_REPORT_DIRECTORY:-${LOG_DIRECTORY}/pipelines-$(date +%Y%m%d-%H%M%S)}"
 LFS_REPORT_DIRECTORY="${LFS_REPORT_DIRECTORY:-${LOG_DIRECTORY}/lfs-$(date +%Y%m%d-%H%M%S)}"
-
 MEMBER_CONFLICTS_FILE="${MEMBER_CONFLICTS_FILE:-${LOG_DIRECTORY}/member-conflicts-$(date +%Y%m%d-%H%M%S).tsv}"
 
 WORK_ROOT=""
@@ -165,9 +128,9 @@ LFS_REPOSITORIES_DETECTED=0
 LFS_REPOSITORIES_MIGRATED=0
 
 mkdir -p "${LOG_DIRECTORY}"
+
 printf 'fecha\trepositorio\tgitlab_username\tgitlab_access_level\tgithub_username\tmotivo\tdetalle\n' \
   > "${MEMBER_CONFLICTS_FILE}"
-
 
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
@@ -228,7 +191,7 @@ cleanup() {
 trap cleanup EXIT
 
 require_command() {
-  local command_name="$1"  
+  local command_name="$1"
 
   if ! command -v "${command_name}" >/dev/null 2>&1; then
     fatal "No se encontró el comando requerido: ${command_name}."
@@ -263,6 +226,16 @@ url_encode() {
 
 http_status_is_success() {
   [[ "$1" =~ ^2[0-9]{2}$ ]]
+}
+
+get_gitlab_next_page() {
+  awk '
+    BEGIN { IGNORECASE=1 }
+    /^x-next-page:/ {
+      gsub(/\r/, "", $2)
+      print $2
+    }
+  ' "${HTTP_HEADERS}" | tail -n 1
 }
 
 is_github_actions_variable() {
@@ -380,12 +353,6 @@ request_api() {
         --header "PRIVATE-TOKEN: ${TOKEN_GITLAB}"
         --header "Accept: application/json"
       )
-
-      [[ -n "${GITLAB_HOST_HEADER}" ]] &&
-        curl_arguments+=(--header "Host: ${GITLAB_HOST_HEADER}")
-
-      [[ "${GITLAB_CURL_NO_PROXY}" == "true" ]] &&
-        curl_arguments+=(--noproxy "*")
       ;;
     GitHub)
       curl_arguments+=(
@@ -452,27 +419,6 @@ git_with_credentials() {
   "$@"
 }
 
-rewrite_gitlab_clone_url() {
-  local original_url="$1"
-  local url_without_scheme=""
-  local repository_path=""
-
-  if [[ -z "${GITLAB_GIT_BASE_URL}" ]]; then
-    printf '%s\n' "${original_url}"
-    return
-  fi
-
-  url_without_scheme="${original_url#*://}"
-
-  if [[ "${url_without_scheme}" != */* ]]; then
-    fatal "La URL GitLab no contiene un path válido: ${original_url}"
-  fi
-
-  repository_path="/${url_without_scheme#*/}"
-
-  printf '%s%s\n' "${GITLAB_GIT_BASE_URL%/}" "${repository_path}"
-}
-
 resolve_github_environment() {
   local gitlab_scope="$1"
   local source_scope=""
@@ -494,8 +440,7 @@ resolve_github_environment() {
       github_environment="$(printf '%s' "${github_environment}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
       allowed_branches="$(printf '%s' "${allowed_branches}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
-      [[ -z "${source_scope}" ]] && continue
-      [[ "${source_scope}" == \#* ]] && continue
+      [[ -z "${source_scope}" || "${source_scope}" == \#* ]] && continue
 
       if [[ "${source_scope}" == "${gitlab_scope}" ]]; then
         [[ -n "${github_environment}" ]] || return 1
@@ -607,19 +552,53 @@ append_project_to_file() {
 
 deduplicate_projects_file() {
   local output_file=""
+
   output_file="$(mktemp "${WORK_ROOT}/projects-deduplicated.XXXXXX.ndjson")"
 
   jq -sc 'unique_by(.id)[]' "${PROJECTS_FILE}" > "${output_file}"
   mv "${output_file}" "${PROJECTS_FILE}"
 }
 
-get_gitlab_projects_from_file() {
+build_project_selection_file() {
+  local raw_item=""
+  local selector=""
+  local IFS=','
+  local repository_list=()
+
+  [[ -n "${REPOSITORIES_FILE}" ]] || return 1
+
+  PROJECT_SELECTION_FILE="$(mktemp "${WORK_ROOT}/repositories-selection.XXXXXX.txt")"
+  : > "${PROJECT_SELECTION_FILE}"
+
+  read -r -a repository_list <<< "${REPOSITORIES_FILE}"
+
+  for raw_item in "${repository_list[@]}"; do
+    selector="$(printf '%s' "${raw_item}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+    [[ -z "${selector}" ]] && continue
+
+    printf '%s\n' "${selector}" >> "${PROJECT_SELECTION_FILE}"
+  done
+
+  [[ -s "${PROJECT_SELECTION_FILE}" ]] || {
+    rm -f "${PROJECT_SELECTION_FILE}"
+    PROJECT_SELECTION_FILE=""
+    fatal "REPOSITORIES_FILE fue definida, pero no contiene repositorios válidos."
+  }
+
+  info "Selección de repositorios creada desde REPOSITORIES_FILE: ${PROJECT_SELECTION_FILE}"
+  info "Repositorios solicitados: $(wc -l < "${PROJECT_SELECTION_FILE}" | tr -d ' ')"
+
+  return 0
+}
+
+get_gitlab_projects_from_selection() {
   local selector=""
   local selector_encoded=""
   local source_file=""
 
-  [[ -f "${REPOSITORIES_FILE}" ]] ||
-    fatal "No existe REPOSITORIES_FILE: ${REPOSITORIES_FILE}"
+  [[ -n "${PROJECT_SELECTION_FILE}" && -f "${PROJECT_SELECTION_FILE}" ]] ||
+    fatal "No existe el archivo temporal de selección de repositorios."
 
   while IFS= read -r selector || [[ -n "${selector}" ]]; do
     selector="$(printf '%s' "${selector}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
@@ -645,9 +624,10 @@ get_gitlab_projects_from_file() {
 
     source_file="$(mktemp "${WORK_ROOT}/selected-project.XXXXXX.json")"
     cp "${HTTP_BODY}" "${source_file}"
+
     append_project_to_file "${source_file}"
     rm -f "${source_file}"
-  done < "${REPOSITORIES_FILE}"
+  done < "${PROJECT_SELECTION_FILE}"
 }
 
 get_gitlab_projects_from_api() {
@@ -701,17 +681,9 @@ get_gitlab_projects_from_api() {
 
     rm -f "${page_file}"
 
-    next_page="$(
-      awk '
-        BEGIN { IGNORECASE=1 }
-        /^x-next-page:/ {
-          gsub(/\r/, "", $2)
-          print $2
-        }
-      ' "${HTTP_HEADERS}" | tail -n 1
-    )"
-
+    next_page="$(get_gitlab_next_page)"
     [[ -n "${next_page}" ]] || break
+
     page="${next_page}"
   done
 }
@@ -720,7 +692,8 @@ get_gitlab_projects() {
   PROJECTS_FILE="$(mktemp "${WORK_ROOT}/projects.XXXXXX.ndjson")"
 
   if [[ -n "${REPOSITORIES_FILE}" ]]; then
-    get_gitlab_projects_from_file
+    build_project_selection_file
+    get_gitlab_projects_from_selection
   else
     get_gitlab_projects_from_api
   fi
@@ -1045,6 +1018,8 @@ migrate_project_variables() {
       return 1
     fi
 
+    next_page="$(get_gitlab_next_page)"
+
     variables_page_file="$(mktemp "${WORK_ROOT}/variables.XXXXXX.json")"
     cp "${HTTP_BODY}" "${variables_page_file}"
 
@@ -1165,16 +1140,6 @@ migrate_project_variables() {
 
     rm -f "${variables_page_file}"
 
-    next_page="$(
-      awk '
-        BEGIN { IGNORECASE=1 }
-        /^x-next-page:/ {
-          gsub(/\r/, "", $2)
-          print $2
-        }
-      ' "${HTTP_HEADERS}" | tail -n 1
-    )"
-
     [[ -n "${next_page}" ]] || break
     page="${next_page}"
   done
@@ -1224,7 +1189,9 @@ migrate_branch_protections() {
 
     [[ -z "${branch_name}" ]] && continue
 
-    if [[ "${branch_name}" == *"*"* || "${branch_name}" == *"?"* || "${branch_name}" == *"["* ]]; then
+    if [[ "${branch_name}" == *"*"* ||
+          "${branch_name}" == *"?"* ||
+          "${branch_name}" == *"["* ]]; then
       warn "Regla wildcard GitLab no migrada automáticamente: ${branch_name}."
       PROTECTIONS_SKIPPED=$((PROTECTIONS_SKIPPED + 1))
       continue
@@ -1289,7 +1256,6 @@ migrate_branch_protections() {
   rm -f "${branches_file}"
   return 0
 }
-
 
 map_gitlab_access_to_github_permission() {
   local access_level="$1"
@@ -1433,7 +1399,7 @@ migrate_repository_members() {
     return 0
   fi
 
-  info "Migrando miembros GitLab hacia ${github_repository} usando usernames equivalentes."
+  info "Migrando miembros GitLab hacia ${github_repository}."
 
   while true; do
     endpoint="${GITLAB_URL}/api/v4/projects/${gitlab_project_id}/members/all?per_page=100&page=${page}"
@@ -1449,24 +1415,12 @@ migrate_repository_members() {
       return 1
     fi
 
-    cat "${HTTP_BODY}"
-
     if ! jq -e 'type == "array"' "${HTTP_BODY}" >/dev/null 2>&1; then
       error "GitLab devolvió una respuesta inválida al consultar miembros."
       return 1
     fi
 
-    # Debe obtenerse antes de hacer llamadas a GitHub, porque request_api
-    # reemplaza HTTP_HEADERS en cada consulta posterior.
-    next_page="$(
-      awk '
-        BEGIN { IGNORECASE=1 }
-        /^x-next-page:/ {
-          gsub(/\r/, "", $2)
-          print $2
-        }
-      ' "${HTTP_HEADERS}" | tail -n 1
-    )"
+    next_page="$(get_gitlab_next_page)"
 
     members_file="$(mktemp "${WORK_ROOT}/gitlab-members.XXXXXX.json")"
     cp "${HTTP_BODY}" "${members_file}"
@@ -1477,13 +1431,9 @@ migrate_repository_members() {
 
       [[ -z "${gitlab_username}" ]] && continue
 
-      # Se asume misma identidad GitLab/GitHub.
-      github_username="${gitlab_username}"
+      github_username="${gitlab_username}${GITHUB_USERNAME_SUFFIX}"
 
       github_user_url="${GITHUB_API_URL}/users/$(url_encode "${github_username}")"
-
-      echo $github_user_url
-      echo $HTTP_BODY
 
       if ! request_api "GitHub" "GET" "${github_user_url}"; then
         register_member_conflict \
@@ -1511,7 +1461,7 @@ migrate_repository_members() {
           "USUARIO_GITHUB_NO_EXISTE" \
           "${github_error_detail}"
 
-        warn "No existe usuario GitHub equivalente para GitLab username=${gitlab_username}."
+        warn "No existe usuario GitHub equivalente para GitLab username=${gitlab_username}; GitHub=${github_username}."
 
         MEMBERS_SKIPPED=$((MEMBERS_SKIPPED + 1))
         continue
@@ -1584,7 +1534,6 @@ migrate_repository_members() {
     rm -f "${members_file}"
 
     [[ -n "${next_page}" ]] || break
-
     page="${next_page}"
   done
 
@@ -1628,6 +1577,7 @@ migrate_project_pipeline() {
   fi
 
   first_branch="${PIPELINE_BRANCHES%%,*}"
+  first_branch="$(printf '%s' "${first_branch}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
   if ! git -C "${mirror_directory}" cat-file \
     -e "refs/heads/${first_branch}:.gitlab-ci.yml" 2>/dev/null; then
@@ -1684,7 +1634,6 @@ migrate_project() {
   local description=""
   local default_branch=""
   local gitlab_clone_url=""
-  local gitlab_clone_url_original=""
   local github_clone_url=""
   local repository_work_dir=""
   local mirror_directory=""
@@ -1692,7 +1641,6 @@ migrate_project() {
   local github_refs_count=""
   local github_return_code=0
   local git_migration_completed=false
-  local gitlab_command=()
   local push_log=""
   local push_head_refspec="refs/heads/*:refs/heads/*"
   local push_tag_refspec="refs/tags/*:refs/tags/*"
@@ -1703,7 +1651,7 @@ migrate_project() {
   repository_name="$(jq -r '.path // empty' <<< "${project_json}")"
   description="$(jq -r '.description // ""' <<< "${project_json}")"
   default_branch="$(jq -r '.default_branch // empty' <<< "${project_json}")"
-  gitlab_clone_url_original="$(jq -r '.http_url_to_repo // empty' <<< "${project_json}")"
+  gitlab_clone_url="$(jq -r '.http_url_to_repo // empty' <<< "${project_json}")"
 
   printf '\n'
   info "================================================================"
@@ -1714,7 +1662,7 @@ migrate_project() {
 
   if [[ -z "${gitlab_project_id}" ||
         -z "${repository_name}" ||
-        -z "${gitlab_clone_url_original}" ]]; then
+        -z "${gitlab_clone_url}" ]]; then
     error "Datos incompletos del proyecto GitLab."
     FAILED_PROJECTS=$((FAILED_PROJECTS + 1))
     return
@@ -1725,8 +1673,6 @@ migrate_project() {
     FAILED_PROJECTS=$((FAILED_PROJECTS + 1))
     return
   fi
-
-  gitlab_clone_url="$(rewrite_gitlab_clone_url "${gitlab_clone_url_original}")"
 
   if github_repository_exists_or_create "${repository_name}" "${description}"; then
     github_clone_url="${CURRENT_GITHUB_CLONE_URL}"
@@ -1747,14 +1693,10 @@ migrate_project() {
   repository_work_dir="$(mktemp -d "${WORK_ROOT}/repository-${repository_name}.XXXXXX")"
   mirror_directory="${repository_work_dir}/repository.git"
 
-  gitlab_command=(git)
-  [[ -n "${GITLAB_GIT_EXTRA_HEADER}" ]] &&
-    gitlab_command+=(-c "http.extraHeader=${GITLAB_GIT_EXTRA_HEADER}")
-
   if ! git_with_credentials \
     "oauth2" \
     "${TOKEN_GITLAB}" \
-    "${gitlab_command[@]}" clone --mirror \
+    git clone --mirror \
     "${gitlab_clone_url}" \
     "${mirror_directory}"; then
 
@@ -1787,9 +1729,17 @@ migrate_project() {
   if [[ "${refs_count}" -eq 0 ]]; then
     warn "Repositorio vacío: ${repository_name}."
 
-    migrate_project_variables \
+    if ! migrate_project_variables \
       "${gitlab_project_id}" \
-      "${OWNER}/${repository_name}" || true
+      "${OWNER}/${repository_name}"; then
+
+      if [[ "${VARIABLES_REQUIRED}" == "true" ]]; then
+        error "Repositorio vacío: falló la migración requerida de variables/secrets."
+        FAILED_PROJECTS=$((FAILED_PROJECTS + 1))
+        rm -rf "${repository_work_dir}"
+        return
+      fi
+    fi
 
     EMPTY_PROJECTS=$((EMPTY_PROJECTS + 1))
     rm -rf "${repository_work_dir}"
@@ -1981,6 +1931,7 @@ main() {
   require_command sed
   require_command sort
   require_command tee
+  require_command grep
 
   [[ -n "${OWNER}" ]] || fatal "Falta OWNER."
   [[ -n "${GITLAB_URL}" ]] || fatal "Falta GITLAB_URL."
@@ -1991,11 +1942,9 @@ main() {
   validate_url "GITHUB_API_URL" "${GITHUB_API_URL}"
   validate_url "GITLAB_IMPORTER_URL" "${GITLAB_IMPORTER_URL}"
 
-  validate_boolean "PRIVATE_REPOSITORIES" "${PRIVATE_REPOSITORIES}"
   validate_boolean "ALLOW_MIRROR_OVERWRITE" "${ALLOW_MIRROR_OVERWRITE}"
   validate_boolean "DRY_RUN" "${DRY_RUN}"
   validate_boolean "SYNC_DEFAULT_BRANCH" "${SYNC_DEFAULT_BRANCH}"
-  validate_boolean "GITLAB_CURL_NO_PROXY" "${GITLAB_CURL_NO_PROXY}"
   validate_boolean "MIGRATE_VARIABLES" "${MIGRATE_VARIABLES}"
   validate_boolean "VARIABLES_REQUIRED" "${VARIABLES_REQUIRED}"
   validate_boolean "MIGRATE_ENVIRONMENT_SCOPED_VARIABLES" "${MIGRATE_ENVIRONMENT_SCOPED_VARIABLES}"
@@ -2029,18 +1978,10 @@ main() {
       ;;
   esac
 
-  [[ "${PRIVATE_REPOSITORIES}" == "true" ]] ||
-    fatal "Este script requiere PRIVATE_REPOSITORIES=true."
-
   [[ -z "${ENVIRONMENT_MAPPING_FILE}" || -f "${ENVIRONMENT_MAPPING_FILE}" ]] ||
     fatal "No existe ENVIRONMENT_MAPPING_FILE: ${ENVIRONMENT_MAPPING_FILE}"
 
-  if [[ -n "${GITLAB_GIT_BASE_URL}" ]]; then
-    validate_url "GITLAB_GIT_BASE_URL" "${GITLAB_GIT_BASE_URL}"
-  fi
-
   if [[ "${MIGRATE_VARIABLES}" == "true" ||
-        "${MIGRATE_REPOSITORY_MEMBERS}" == "true" ||
         "${MIGRATE_PIPELINES}" == "true" ]]; then
     require_command gh
   fi
@@ -2069,7 +2010,6 @@ main() {
 
   GITLAB_URL="${GITLAB_URL%/}"
   GITHUB_API_URL="${GITHUB_API_URL%/}"
-  GITLAB_GIT_BASE_URL="${GITLAB_GIT_BASE_URL%/}"
   GITLAB_IMPORTER_URL="${GITLAB_IMPORTER_URL%/}"
 
   WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/gitlab-github-migration.XXXXXX")"
@@ -2082,7 +2022,7 @@ main() {
   info "Inicio de migración GitLab -> GitHub."
   info "Organización GitHub: ${OWNER}"
   info "Grupo GitLab: ${GROUP_GITLAB:-No especificado}"
-  info "Archivo repositorios: ${REPOSITORIES_FILE:-No especificado}"
+  info "Lista repositorios: ${REPOSITORIES_FILE:-No especificada}"
   info "LFS_MODE: ${LFS_MODE}"
   info "Migrar variables: ${MIGRATE_VARIABLES}"
   info "Migrar protecciones: ${MIGRATE_BRANCH_PROTECTIONS}"

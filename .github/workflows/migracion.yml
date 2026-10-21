@@ -13,6 +13,51 @@ on:
         required: false
         type: string
 
+      migrar_pipeline:
+        description: "Incluir Migración Pipeline"
+        required: true
+        type: choice
+        default: 'S'
+        options:
+          - S
+          - N
+
+      migrar_variables:
+        description: "Incluir Migración Variables / Secretos"
+        required: true
+        type: choice
+        default: 'S'
+        options:
+          - S
+          - N
+
+      migrar_ambientes:
+        description: "Incluir Migración Ambientes"
+        required: true
+        type: choice
+        default: 'S'
+        options:
+          - S
+          - N
+
+      migrar_reglas_de_ramas:
+        description: "Incluir Migración Reglas Branch"
+        required: true
+        type: choice
+        default: 'S'
+        options:
+          - S
+          - N
+
+      migrar_miembros:
+        description: "Incluir Migración Miembros"
+        required: true
+        type: choice
+        default: 'S'
+        options:
+          - S
+          - N
+
       port_run_id:
         description: ID de la ejecución en Port
         required: false
@@ -31,6 +76,13 @@ jobs:
       # Variables recibidas desde Port
       GROUP_GITLAB: ${{ inputs.grupo_gitlab }}
       OWNER: ${{ inputs.organizacion_github }}
+      MIGRATE_PIPELINES: ${{ inputs.migrar_pipeline == 'S' && 'true' || 'false' }}
+      MIGRATE_VARIABLES: ${{ inputs.migrar_variables == 'S' && 'true' || 'false'  }}
+      CREATE_GITHUB_ENVIRONMENTS: ${{ inputs.migrar_ambientes == 'S' && 'true' || 'false'  }}
+      CREATE_ENVIRONMENT_BRANCH_POLICIES: ${{ inputs.migrar_ambientes == 'S' && 'true' || 'false'  }}
+      MIGRATE_ENVIRONMENT_SCOPED_VARIABLES: ${{ inputs.migrar_ambientes == 'S' && 'true' || 'false'  }}
+      MIGRATE_BRANCH_PROTECTIONS: ${{ inputs.migrar_reglas_de_ramas == 'S' && 'true' || 'false'  }}
+      MIGRATE_REPOSITORY_MEMBERS: ${{ inputs.migrar_miembros == 'S' && 'true' || 'false'  }}
 
       # Variables de configuración del repositorio en GitHub:
       # Settings > Secrets and variables > Actions > Variables
