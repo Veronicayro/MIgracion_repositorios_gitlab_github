@@ -86,8 +86,8 @@ jobs:
 
       # Variables de configuración del repositorio en GitHub:
       # Settings > Secrets and variables > Actions > Variables
-      TOKEN_GITHUB: ${{ vars.TOKEN_GITHUB }}
-      TOKEN_GITLAB: ${{ vars.TOKEN_GITLAB }}
+      TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
+      TOKEN_GITLAB: ${{ secrets.TOKEN_GITLAB }}
 
     steps:
       - name: Descargar código del repositorio
