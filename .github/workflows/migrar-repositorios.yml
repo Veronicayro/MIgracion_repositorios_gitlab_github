@@ -25,11 +25,12 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. DESCARGAR EL REPOSITORIO DEL SCRIPT
+      # 1. DESCARGAR REPOSITORIO DEL PROYECTO DE MIGRACIÓN
       # ============================================================
 
-      - name: Descargar repositorio de migración
+      - name: Descargar repositorio
         uses: actions/checkout@v4
+
 
       # ============================================================
       # 2. INSTALAR jq
@@ -39,6 +40,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
+
 
       # ============================================================
       # 3. INSTALAR GITHUB CLI
@@ -51,6 +53,7 @@ jobs:
           sudo apt-get install -y gh
           gh --version
 
+
       # ============================================================
       # 4. INSTALAR GITHUB ACTIONS IMPORTER
       # ============================================================
@@ -62,6 +65,7 @@ jobs:
           gh extension install github/gh-actions-importer
           gh actions-importer version
 
+
       # ============================================================
       # 5. VERIFICAR DOCKER
       # ============================================================
@@ -71,6 +75,7 @@ jobs:
           docker --version
           docker info
 
+
       # ============================================================
       # 6. DAR PERMISOS A LOS SCRIPTS
       # ============================================================
@@ -79,6 +84,7 @@ jobs:
         run: |
           chmod +x scripts/migrar-repositorios.sh
           chmod +x scripts/validar-integridad-migracion.sh
+
 
       # ============================================================
       # 7. MIGRAR REPOSITORIO GITLAB → GITHUB
@@ -94,11 +100,12 @@ jobs:
         run: |
           ./scripts/migrar-repositorios.sh
 
+
       # ============================================================
-      # 8. CONVERTIR PIPELINE GITLAB → GITHUB ACTIONS
+      # 8. CONVERTIR PIPELINE CON ACTIONS IMPORTER
       # ============================================================
 
-      - name: Convertir pipeline con Actions Importer
+      - name: Convertir pipeline GitLab → GitHub Actions
         env:
           GH_TOKEN: ${{ secrets.TOKEN_GITHUB }}
 
@@ -123,6 +130,7 @@ jobs:
             --namespace "$GROUP_GITLAB" \
             --project "$PROJECT_GITLAB" \
             --output-dir ./output
+
 
       # ============================================================
       # 9. BUSCAR WORKFLOW GENERADO
@@ -152,15 +160,17 @@ jobs:
           echo "WORKFLOW ENCONTRADO:"
           echo "$WORKFLOW"
 
+
       # ============================================================
-      # 10. COPIAR WORKFLOW AL REPOSITORIO MIGRADO
+      # 10. CLONAR REPOSITORIO MIGRADO Y COPIAR WORKFLOW
       # ============================================================
 
-      - name: Copiar workflow al repositorio GitHub
+      - name: Publicar workflow convertido
         env:
-          GROUP_GITLAB: ${{ inputs.group_gitlab }}
-          PROJECT_GITLAB: ${{ inputs.project_gitlab }}
+          TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
           OWNER: ${{ inputs.owner }}
+          PROJECT_GITLAB: ${{ inputs.project_gitlab }}
+
         run: |
 
           echo "========================================"
@@ -180,35 +190,58 @@ jobs:
           echo "Workflow generado:"
           echo "$WORKFLOW"
 
-          # Crear carpeta temporal para el repositorio migrado
+          # --------------------------------------------------------
+          # Crear carpeta para clonar el repositorio
+          # --------------------------------------------------------
+
           rm -rf ./repositorio-final
 
           mkdir -p ./repositorio-final
 
-          # Clonar el repositorio de GitHub
+          # --------------------------------------------------------
+          # Clonar repositorio de GitHub
+          # --------------------------------------------------------
+
           git clone \
             "https://x-access-token:${TOKEN_GITHUB}@github.com/${OWNER}/${PROJECT_GITLAB}.git" \
             ./repositorio-final
 
+          # --------------------------------------------------------
+          # Entrar al repositorio
+          # --------------------------------------------------------
+
           cd ./repositorio-final
 
-          # Crear carpeta de workflows
+          # --------------------------------------------------------
+          # Crear carpeta de GitHub Actions
+          # --------------------------------------------------------
+
           mkdir -p .github/workflows
 
-          # Copiar workflow generado
+          # --------------------------------------------------------
+          # Copiar workflow convertido
+          # --------------------------------------------------------
+
           cp "../$WORKFLOW" \
             ".github/workflows/${PROJECT_GITLAB}.yml"
 
           echo ""
-          echo "WORKFLOW COPIADO:"
+          echo "========================================"
+          echo "WORKFLOW COPIADO"
+          echo "========================================"
+
           ls -la .github/workflows/
 
           echo ""
-          echo "CONTENIDO:"
+          echo "========================================"
+          echo "CONTENIDO DEL WORKFLOW"
+          echo "========================================"
+
           cat ".github/workflows/${PROJECT_GITLAB}.yml"
 
+
       # ============================================================
-      # 11. CONFIGURAR GIT
+      # 11. CONFIGURAR IDENTIDAD DE GIT
       # ============================================================
 
       - name: Configurar Git
@@ -216,13 +249,16 @@ jobs:
         run: |
 
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
 
       # ============================================================
-      # 12. COMMIT DEL WORKFLOW
+      # 12. CREAR COMMIT
       # ============================================================
 
-      - name: Commit del workflow convertido
+      - name: Crear commit del workflow
         working-directory: ./repositorio-final
         run: |
 
@@ -233,21 +269,23 @@ jobs:
           git add .github/workflows/
 
           if git diff --cached --quiet; then
-            echo "No hay cambios para hacer commit"
+            echo "No existen cambios para hacer commit"
             exit 0
           fi
 
           git commit \
             -m "chore: migrate GitLab CI pipeline to GitHub Actions"
 
+
       # ============================================================
-      # 13. PUSH DEL WORKFLOW
+      # 13. PUSH A GITHUB
       # ============================================================
 
       - name: Publicar workflow en GitHub
         working-directory: ./repositorio-final
         env:
           TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
+
         run: |
 
           echo "========================================"
@@ -259,6 +297,7 @@ jobs:
           echo ""
           echo "WORKFLOW PUBLICADO CORRECTAMENTE"
 
+
       # ============================================================
       # 14. RESUMEN
       # ============================================================
@@ -268,6 +307,7 @@ jobs:
           GROUP_GITLAB: ${{ inputs.group_gitlab }}
           PROJECT_GITLAB: ${{ inputs.project_gitlab }}
           OWNER: ${{ inputs.owner }}
+
         run: |
 
           echo ""
@@ -276,11 +316,11 @@ jobs:
           echo "========================================"
 
           echo ""
-          echo "GitLab:"
+          echo "Repositorio GitLab:"
           echo "${GROUP_GITLAB}/${PROJECT_GITLAB}"
 
           echo ""
-          echo "GitHub:"
+          echo "Repositorio GitHub:"
           echo "${OWNER}/${PROJECT_GITLAB}"
 
           echo ""
