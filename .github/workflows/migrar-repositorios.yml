@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # 2. INSTALAR JQ
+      # 2. INSTALAR jq
       # ============================================================
 
       - name: Instalar jq
@@ -45,6 +45,8 @@ jobs:
       # ============================================================
 
       - name: Instalar GitHub CLI
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN_GITHUB }}
         run: |
           sudo apt-get install -y gh
           gh --version
@@ -54,6 +56,8 @@ jobs:
       # ============================================================
 
       - name: Instalar GitHub Actions Importer
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN_GITHUB }}
         run: |
           gh extension install github/gh-actions-importer
           gh actions-importer version
@@ -77,7 +81,7 @@ jobs:
           chmod +x scripts/validar-integridad-migracion.sh
 
       # ============================================================
-      # 7. MIGRAR REPOSITORIO DE GITLAB A GITHUB
+      # 7. EJECUTAR MIGRACIÓN
       # ============================================================
 
       - name: Ejecutar migración
@@ -91,15 +95,18 @@ jobs:
           ./scripts/migrar-repositorios.sh
 
       # ============================================================
-      # 8. CONVERTIR PIPELINE CON ACTIONS IMPORTER
+      # 8. CONVERTIR PIPELINE GITLAB A GITHUB ACTIONS
       # ============================================================
 
       - name: Convertir pipeline GitLab a GitHub Actions
         env:
+          GH_TOKEN: ${{ secrets.TOKEN_GITHUB }}
           GITHUB_ACCESS_TOKEN: ${{ secrets.TOKEN_GITHUB }}
           GITHUB_INSTANCE_URL: https://github.com
           GITLAB_ACCESS_TOKEN: ${{ secrets.TOKEN_GITLAB }}
           GITLAB_INSTANCE_URL: https://gitlab.com
+          GROUP_GITLAB: ${{ inputs.group_gitlab }}
+          PROJECT_GITLAB: ${{ inputs.project_gitlab }}
         run: |
           mkdir -p output
 
@@ -109,13 +116,13 @@ jobs:
             --output-dir ./output
 
       # ============================================================
-      # 9. MOSTRAR RESULTADO
+      # 9. MOSTRAR RESULTADO DE ACTIONS IMPORTER
       # ============================================================
 
-      - name: Mostrar workflow convertido
+      - name: Mostrar archivos generados
         run: |
           echo "========================================"
-          echo "ARCHIVOS GENERADOS"
+          echo "ARCHIVOS GENERADOS POR ACTIONS IMPORTER"
           echo "========================================"
 
           find ./output -type f -print
@@ -125,4 +132,11 @@ jobs:
           echo "WORKFLOWS CONVERTIDOS"
           echo "========================================"
 
-          find ./output -type f \( -name "*.yml" -o -name "*.yaml" \) -print -exec cat {} \;
+          find ./output -type f \( -name "*.yml" -o -name "*.yaml" \) | while read archivo
+          do
+            echo ""
+            echo "========================================"
+            echo "ARCHIVO: $archivo"
+            echo "========================================"
+            cat "$archivo"
+          done
