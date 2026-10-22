@@ -20,7 +20,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. DESCARGAR EL REPOSITORIO DE MIGRACIÓN
+      # 1. DESCARGAR REPOSITORIO DEL SCRIPT
       # ============================================================
 
       - name: Descargar repositorio
@@ -72,7 +72,7 @@ jobs:
 
 
       # ============================================================
-      # 6. PERMISOS A LOS SCRIPTS
+      # 6. DAR PERMISOS A LOS SCRIPTS
       # ============================================================
 
       - name: Dar permisos a los scripts
@@ -82,13 +82,14 @@ jobs:
 
 
       # ============================================================
-      # 7. OBTENER PROYECTOS DEL GRUPO
+      # 7. OBTENER TODOS LOS PROYECTOS DEL GRUPO
       # ============================================================
 
       - name: Obtener proyectos de GitLab
         env:
           TOKEN_GITLAB: ${{ secrets.TOKEN_GITLAB }}
           GROUP_GITLAB: ${{ inputs.group_gitlab }}
+
         run: |
 
           echo "========================================"
@@ -104,7 +105,7 @@ jobs:
 
           echo ""
           echo "PROYECTOS ENCONTRADOS:"
-          
+
           jq -r '.[].path' projects/gitlab-projects.json
 
           TOTAL=$(jq 'length' projects/gitlab-projects.json)
@@ -119,10 +120,10 @@ jobs:
 
 
       # ============================================================
-      # 8. MIGRAR TODOS LOS REPOSITORIOS
+      # 8. MIGRAR REPOSITORIOS GITLAB → GITHUB
       # ============================================================
 
-      - name: Migrar repositorios GitLab → GitHub
+      - name: Migrar repositorios GitLab a GitHub
         env:
           TOKEN_GITLAB: ${{ secrets.TOKEN_GITLAB }}
           TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
@@ -132,7 +133,7 @@ jobs:
         run: |
 
           echo "========================================"
-          echo "INICIO DE MIGRACIÓN DEL GRUPO"
+          echo "INICIO DE MIGRACIÓN"
           echo "========================================"
 
           jq -c '.[]' projects/gitlab-projects.json |
@@ -151,7 +152,7 @@ jobs:
             echo "========================================"
 
             # ------------------------------------------------------
-            # Comprobar si existe en GitHub
+            # COMPROBAR SI EXISTE EN GITHUB
             # ------------------------------------------------------
 
             HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" \
@@ -159,14 +160,16 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/${OWNER}/${PROJECT_GITLAB}")
 
+            echo "HTTP CODE: $HTTP_CODE"
+
             if [ "$HTTP_CODE" == "200" ]; then
 
-              echo "REPOSITORIO YA EXISTE EN GITHUB"
+              echo "EL REPOSITORIO YA EXISTE EN GITHUB"
 
             else
 
-              echo "REPOSITORIO NO EXISTE EN GITHUB"
-              echo "CREANDO REPOSITORIO..."
+              echo "EL REPOSITORIO NO EXISTE EN GITHUB"
+              echo "SE VA A CREAR"
 
               curl --fail --silent --show-error \
                 -X POST \
@@ -189,7 +192,7 @@ jobs:
             fi
 
             # ------------------------------------------------------
-            # Crear carpeta de trabajo
+            # PREPARAR CARPETA
             # ------------------------------------------------------
 
             rm -rf "./migracion"
@@ -199,17 +202,17 @@ jobs:
             cd "./migracion"
 
             # ------------------------------------------------------
-            # Preparar URL autenticada de GitLab
+            # AUTENTICAR GITLAB
             # ------------------------------------------------------
 
             URL_GITLAB_AUTH="${PROJECT_URL/https:\/\/gitlab.com/https:\/\/oauth2:${TOKEN_GITLAB}@gitlab.com}"
 
             # ------------------------------------------------------
-            # Clonar GitLab como mirror
+            # CLONAR COMO MIRROR
             # ------------------------------------------------------
 
             echo ""
-            echo "CLONANDO GITLAB..."
+            echo "1. CLONANDO REPOSITORIO DE GITLAB"
 
             git clone --mirror "$URL_GITLAB_AUTH" repositorio.git
 
@@ -219,47 +222,72 @@ jobs:
               continue
             fi
 
-            cd repositorio.git
+            echo "CLON CORRECTO"
 
             # ------------------------------------------------------
-            # Verificar referencias
+            # VERIFICAR REFERENCIAS
             # ------------------------------------------------------
+
+            echo ""
+            echo "2. VERIFICANDO CONTENIDO"
+
+            cd repositorio.git
+
+            git show-ref
 
             TOTAL_REFS=$(git show-ref | wc -l)
 
+            echo ""
             echo "TOTAL DE REFERENCIAS: $TOTAL_REFS"
 
             if [ "$TOTAL_REFS" -eq 0 ]; then
-              echo "ERROR: Repositorio sin referencias"
+              echo "ERROR: REPOSITORIO SIN REFERENCIAS"
               cd ../..
               continue
             fi
 
             # ------------------------------------------------------
-            # Configurar URL GitHub
+            # CONFIGURAR REMOTE GITHUB
             # ------------------------------------------------------
+
+            echo ""
+            echo "3. CONFIGURANDO REMOTE DE GITHUB"
 
             URL_GITHUB="https://x-access-token:${TOKEN_GITHUB}@github.com/${OWNER}/${PROJECT_GITLAB}.git"
 
             git remote set-url origin "$URL_GITHUB"
 
+            git remote -v
+
             # ------------------------------------------------------
-            # Push completo
+            # PUSH MIRROR
             # ------------------------------------------------------
 
             echo ""
-            echo "PUSH MIRROR A GITHUB..."
+            echo "4. EJECUTANDO PUSH --MIRROR"
 
             git push --mirror origin
 
             if [ $? -ne 0 ]; then
-              echo "ERROR: Falló el push de $PROJECT_GITLAB"
+              echo "ERROR: FALLO EL PUSH DE $PROJECT_GITLAB"
               cd ../..
               continue
             fi
 
             echo ""
-            echo "MIGRACIÓN COMPLETADA: $PROJECT_GITLAB"
+            echo "PUSH COMPLETADO CORRECTAMENTE"
+
+            # ------------------------------------------------------
+            # VALIDACIÓN
+            # ------------------------------------------------------
+
+            echo ""
+            echo "5. VALIDANDO REFERENCIAS EN GITHUB"
+
+            git ls-remote origin
+
+            echo ""
+            echo "MIGRACIÓN FINALIZADA: $PROJECT_GITLAB"
 
             cd ../..
 
@@ -270,7 +298,7 @@ jobs:
       # 9. CONVERTIR PIPELINES CON ACTIONS IMPORTER
       # ============================================================
 
-      - name: Convertir pipelines GitLab → GitHub Actions
+      - name: Convertir pipelines GitLab a GitHub Actions
         env:
           GH_TOKEN: ${{ secrets.TOKEN_GITHUB }}
 
@@ -285,9 +313,10 @@ jobs:
         run: |
 
           echo "========================================"
-          echo "INICIO DE CONVERSIÓN DE PIPELINES"
+          echo "CONVIRTIENDO PIPELINES"
           echo "========================================"
 
+          rm -rf output
           mkdir -p output
 
           jq -r '.[].path' projects/gitlab-projects.json |
@@ -296,14 +325,10 @@ jobs:
 
             echo ""
             echo "========================================"
-            echo "CONVIRTIENDO: $PROJECT_GITLAB"
+            echo "PROYECTO: $PROJECT_GITLAB"
             echo "========================================"
 
             mkdir -p "output/${PROJECT_GITLAB}"
-
-            # ------------------------------------------------------
-            # Intentar convertir pipeline
-            # ------------------------------------------------------
 
             gh actions-importer dry-run gitlab \
               --namespace "$GROUP_GITLAB" \
@@ -318,13 +343,47 @@ jobs:
               }
 
             echo ""
-            echo "CONVERSIÓN COMPLETADA: $PROJECT_GITLAB"
+            echo "CONVERSIÓN COMPLETADA"
 
           done
 
 
       # ============================================================
-      # 10. PUBLICAR WORKFLOWS EN CADA REPOSITORIO
+      # 10. MOSTRAR WORKFLOWS GENERADOS
+      # ============================================================
+
+      - name: Mostrar workflows generados
+        run: |
+
+          echo "========================================"
+          echo "WORKFLOWS GENERADOS"
+          echo "========================================"
+
+          find ./output \
+            -type f \
+            \( -name "*.yml" -o -name "*.yaml" \) \
+            -print
+
+          echo ""
+
+          find ./output \
+            -type f \
+            \( -name "*.yml" -o -name "*.yaml" \) |
+          while read -r archivo
+          do
+
+            echo ""
+            echo "========================================"
+            echo "ARCHIVO: $archivo"
+            echo "========================================"
+
+            cat "$archivo"
+
+          done
+
+
+      # ============================================================
+      # 11. PUBLICAR WORKFLOWS EN GITHUB
       # ============================================================
 
       - name: Publicar workflows convertidos
@@ -353,7 +412,7 @@ jobs:
             echo "========================================"
 
             # ------------------------------------------------------
-            # Buscar workflow generado
+            # BUSCAR WORKFLOW
             # ------------------------------------------------------
 
             WORKFLOW=$(find "$PROJECT_DIR" \
@@ -363,16 +422,22 @@ jobs:
 
             if [ -z "$WORKFLOW" ]; then
 
-              echo "No se encontró workflow para $PROJECT_GITLAB"
+              echo "NO SE ENCONTRÓ WORKFLOW"
+              echo "SE OMITIRÁ ESTE PROYECTO"
+
               continue
 
             fi
 
+            # Convertir a ruta absoluta
+            WORKFLOW=$(realpath "$WORKFLOW")
+
+            echo ""
             echo "WORKFLOW ENCONTRADO:"
             echo "$WORKFLOW"
 
             # ------------------------------------------------------
-            # Clonar repositorio GitHub
+            # CLONAR REPOSITORIO GITHUB
             # ------------------------------------------------------
 
             rm -rf "./repositorio-final"
@@ -381,26 +446,30 @@ jobs:
               "https://x-access-token:${TOKEN_GITHUB}@github.com/${OWNER}/${PROJECT_GITLAB}.git" \
               "./repositorio-final"
 
+            # ------------------------------------------------------
+            # CREAR CARPETA WORKFLOWS
+            # ------------------------------------------------------
+
+            mkdir -p "./repositorio-final/.github/workflows"
+
+            # ------------------------------------------------------
+            # COPIAR WORKFLOW
+            # ------------------------------------------------------
+
+            cp "$WORKFLOW" \
+              "./repositorio-final/.github/workflows/${PROJECT_GITLAB}.yml"
+
+            echo ""
+            echo "WORKFLOW COPIADO CORRECTAMENTE"
+
+            # ------------------------------------------------------
+            # ENTRAR AL REPOSITORIO
+            # ------------------------------------------------------
+
             cd "./repositorio-final"
 
             # ------------------------------------------------------
-            # Crear carpeta workflows
-            # ------------------------------------------------------
-
-            mkdir -p ".github/workflows"
-
-            # ------------------------------------------------------
-            # Copiar workflow
-            # ------------------------------------------------------
-
-            cp "../../${WORKFLOW}" \
-              ".github/workflows/${PROJECT_GITLAB}.yml"
-
-            echo ""
-            echo "WORKFLOW COPIADO"
-
-            # ------------------------------------------------------
-            # Configurar Git
+            # CONFIGURAR GIT
             # ------------------------------------------------------
 
             git config user.name "github-actions[bot]"
@@ -409,14 +478,15 @@ jobs:
               "41898282+github-actions[bot]@users.noreply.github.com"
 
             # ------------------------------------------------------
-            # Commit
+            # COMMIT
             # ------------------------------------------------------
 
             git add ".github/workflows/"
 
             if git diff --cached --quiet; then
 
-              echo "No hay cambios para publicar"
+              echo ""
+              echo "NO HAY CAMBIOS PARA PUBLICAR"
 
             else
 
@@ -424,13 +494,16 @@ jobs:
                 -m "chore: migrate GitLab CI pipeline to GitHub Actions"
 
               # ----------------------------------------------------
-              # Push
+              # PUSH
               # ----------------------------------------------------
+
+              echo ""
+              echo "PUBLICANDO WORKFLOW..."
 
               git push origin HEAD
 
               echo ""
-              echo "WORKFLOW PUBLICADO: $PROJECT_GITLAB"
+              echo "WORKFLOW PUBLICADO CORRECTAMENTE"
 
             fi
 
@@ -440,10 +513,10 @@ jobs:
 
 
       # ============================================================
-      # 11. RESUMEN
+      # 12. RESUMEN
       # ============================================================
 
-      - name: Resumen
+      - name: Resumen de migración
         env:
           GROUP_GITLAB: ${{ inputs.group_gitlab }}
           OWNER: ${{ inputs.owner }}
@@ -452,7 +525,7 @@ jobs:
 
           echo ""
           echo "========================================"
-          echo "MIGRACIÓN DEL GRUPO FINALIZADA"
+          echo "MIGRACIÓN FINALIZADA"
           echo "========================================"
 
           echo ""
@@ -464,7 +537,8 @@ jobs:
           echo "$OWNER"
 
           echo ""
-          echo "PROYECTOS:"
+          echo "PROYECTOS PROCESADOS:"
+
           jq -r '.[].path' projects/gitlab-projects.json
 
           echo ""
