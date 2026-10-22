@@ -1,10 +1,15 @@
-name: Migrar y validar repositorios GitLab a GitHub
+name: Migrar y convertir repositorios GitLab a GitHub
 
 on:
   workflow_dispatch:
     inputs:
       group_gitlab:
         description: "Grupo de GitLab"
+        required: true
+        type: string
+
+      project_gitlab:
+        description: "Repositorio de GitLab"
         required: true
         type: string
 
@@ -18,32 +23,113 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ============================================================
+      # 1. DESCARGAR EL REPOSITORIO DE MIGRACIÓN
+      # ============================================================
+
       - name: Descargar repositorio
         uses: actions/checkout@v4
+
+      # ============================================================
+      # 2. INSTALAR jq
+      # ============================================================
 
       - name: Instalar jq
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
 
+      # ============================================================
+      # 3. INSTALAR GITHUB CLI
+      # ============================================================
+
       - name: Instalar GitHub CLI
         run: |
           sudo apt-get install -y gh
+          gh --version
+
+      # ============================================================
+      # 4. INSTALAR GITHUB ACTIONS IMPORTER
+      # ============================================================
 
       - name: Instalar GitHub Actions Importer
         run: |
           gh extension install github/gh-actions-importer
           gh actions-importer version
 
+      # ============================================================
+      # 5. DAR PERMISOS A LOS SCRIPTS
+      # ============================================================
+
       - name: Dar permisos a los scripts
         run: |
           chmod +x scripts/migrar-repositorios.sh
           chmod +x scripts/validar-integridad-migracion.sh
 
+      # ============================================================
+      # 6. MIGRAR REPOSITORIO DE GITLAB A GITHUB
+      # ============================================================
+
       - name: Ejecutar migración
         env:
           TOKEN_GITLAB: ${{ secrets.TOKEN_GITLAB }}
           GROUP_GITLAB: ${{ inputs.group_gitlab }}
+          PROJECT_GITLAB: ${{ inputs.project_gitlab }}
           TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
           OWNER: ${{ inputs.owner }}
-        run: ./scripts/migrar-repositorios.sh
+        run: |
+          ./scripts/migrar-repositorios.sh
+
+      # ============================================================
+      # 7. CONFIGURAR CREDENCIALES PARA ACTIONS IMPORTER
+      # ============================================================
+
+      - name: Configurar Actions Importer
+        env:
+          GITHUB_ACCESS_TOKEN: ${{ secrets.TOKEN_GITHUB }}
+          GITHUB_INSTANCE_URL: https://github.com
+          GITLAB_ACCESS_TOKEN: ${{ secrets.TOKEN_GITLAB }}
+          GITLAB_INSTANCE_URL: https://gitlab.com
+        run: |
+          gh actions-importer configure
+
+      # ============================================================
+      # 8. CONVERTIR PIPELINE DE GITLAB
+      # ============================================================
+
+      - name: Convertir pipeline GitLab a GitHub Actions
+        env:
+          GITHUB_ACCESS_TOKEN: ${{ secrets.TOKEN_GITHUB }}
+          GITHUB_INSTANCE_URL: https://github.com
+          GITLAB_ACCESS_TOKEN: ${{ secrets.TOKEN_GITLAB }}
+          GITLAB_INSTANCE_URL: https://gitlab.com
+        run: |
+          mkdir -p output
+
+          gh actions-importer dry-run gitlab \
+            --namespace "$GROUP_GITLAB" \
+            --project "$PROJECT_GITLAB" \
+            --output-dir ./output
+
+      # ============================================================
+      # 9. MOSTRAR RESULTADO DE LA CONVERSIÓN
+      # ============================================================
+
+      - name: Mostrar archivos convertidos
+        run: |
+          echo "========================================"
+          echo "ARCHIVOS GENERADOS POR ACTIONS IMPORTER"
+          echo "========================================"
+
+          find ./output -type f -print
+
+          echo ""
+          echo "========================================"
+          echo "CONTENIDO"
+          echo "========================================"
+
+          find ./output -type f -name "*.yml" -o -name "*.yaml" | while read archivo; do
+            echo ""
+            echo "===== $archivo ====="
+            cat "$archivo"
+          done
