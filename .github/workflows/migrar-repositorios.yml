@@ -5,7 +5,7 @@ on:
     inputs:
       group_gitlab:
         description: "Grupo de GitLab"
-        required: false
+        required: true
         type: string
 
       owner:
@@ -25,6 +25,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
+
+      - name: Instalar GitHub CLI
+        run: |
+          sudo apt-get install -y gh
+
+      - name: Instalar GitHub Actions Importer
+        run: |
+          gh extension install github/gh-actions-importer
+          gh actions-importer version
 
       - name: Dar permisos a los scripts
         run: |
