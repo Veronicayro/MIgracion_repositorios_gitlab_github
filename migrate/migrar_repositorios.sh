@@ -450,7 +450,7 @@ resolve_github_environment() {
     done < "${ENVIRONMENT_MAPPING_FILE}"
   fi
 
-  if [[ "${ALLOW_DIRECT_ENVIRONMENT_SCOPE_MAPPING}" == "true" ]]; then
+  if [[ "${ALLOW_DIRECT_ENVIRONMENT_SCOPE_MAPPING}" == "true" || -z "${ENVIRONMENT_MAPPING_FILE}" ]]; then
     printf '%s|%s\n' "${gitlab_scope}" ""
     return 0
   fi
@@ -766,13 +766,13 @@ github_repository_exists_or_create() {
       if ! request_api \
         "GitHub" \
         "POST" \
-        "${GITHUB_API_URL}/orgs/${owner_encoded}/repos" \
+        "${GITHUB_API_URL}/user/repos" \
         "${payload}"; then
         return 1
       fi
 
       if [[ "${HTTP_STATUS}" != "201" ]]; then
-        show_http_error "GitHub" "${GITHUB_API_URL}/orgs/${owner_encoded}/repos"
+        show_http_error "GitHub" "${GITHUB_API_URL}/user/repos"
         return 1
       fi
 
@@ -975,6 +975,34 @@ push_lfs_objects() {
   return 0
 }
 
+resolve_variable_environment_scopes() {
+  local variable_key="$1" source_scope="$2" variables_file="$3" environments_file="$4"
+  jq -r --arg key "${variable_key}" --arg scope "${source_scope}" --slurpfile envs "${environments_file}" '
+    def quote_regex:
+      explode | map(. as $code | if ([46,92,43,63,94,36,124,40,41,91,93,123,125] | index($code)) != null
+        then [92,$code] else [$code] end) | flatten | implode;
+    def matches($pattern; $name):
+      ($pattern | split("*") | map(quote_regex) | join(".*")) as $regex
+      | $name | test("^" + $regex + "$");
+    . as $variables
+    | if any(.[]; (.key | ascii_upcase) == ($key | ascii_upcase) and .key != $key) then
+        error("Claves diferentes colisionan en GitHub (case insensitive)")
+      elif $scope == "*" or ($scope | contains("*") | not) then $scope
+      else
+        ([$envs[0][] | .name] + [.[] | (.environment_scope // "*") | select(contains("*") | not)] | unique)[]
+        | . as $name | select(matches($scope; $name))
+        | [$variables[] | select(.key == $key) | (.environment_scope // "*") as $candidate
+            | select(matches($candidate; $name))
+            | {scope:$candidate,score:(if $candidate == $name then 1000000 + ($candidate | length)
+                else ($candidate | gsub("\\*"; "") | length) end)}] as $candidates
+        | ($candidates | map(.score) | max) as $max
+        | ($candidates | map(select(.score == $max))) as $best
+        | select(($best | length) == 1 and $best[0].scope == $scope)
+        | $name
+      end
+  ' "${variables_file}"
+}
+
 migrate_project_variables() {
   local gitlab_project_id="$1"
   local github_repository="$2"
@@ -998,6 +1026,7 @@ migrate_project_variables() {
   local github_environment=""
   local environment_branch_policy=""
   local environment_resolution_code=0
+  local inventory_file="" environments_file="" scopes_file="" source_environment_scope=""
 
   [[ "${MIGRATE_VARIABLES}" == "true" ]] || return 0
 
@@ -1006,6 +1035,11 @@ migrate_project_variables() {
     return 0
   fi
 
+  inventory_file="$(mktemp "${WORK_ROOT}/variable-inventory.XXXXXX.json")"
+  environments_file="$(mktemp "${WORK_ROOT}/variable-environments.XXXXXX.json")"
+  scopes_file="$(mktemp "${WORK_ROOT}/variable-scopes.XXXXXX.txt")"
+  printf '[]\n' > "${environments_file}"
+  : > "${inventory_file}.ndjson"
   while true; do
     variables_url="${GITLAB_URL}/api/v4/projects/${gitlab_project_id}/variables?per_page=100&page=${page}"
 
@@ -1018,18 +1052,31 @@ migrate_project_variables() {
       return 1
     fi
 
+    if ! jq -e 'type == "array"' "${HTTP_BODY}" >/dev/null; then
+      error "GitLab devolvió una lista de variables inválida."
+      return 1
+    fi
     next_page="$(get_gitlab_next_page)"
-
-    variables_page_file="$(mktemp "${WORK_ROOT}/variables.XXXXXX.json")"
-    cp "${HTTP_BODY}" "${variables_page_file}"
-
-    while IFS= read -r variable_json; do
+    jq -c '.[]' "${HTTP_BODY}" >> "${inventory_file}.ndjson"
+    [[ -n "${next_page}" ]] || break
+    page="${next_page}"
+  done
+  jq -s '.' "${inventory_file}.ndjson" > "${inventory_file}"
+  if [[ "${MIGRATE_ENVIRONMENT_SCOPED_VARIABLES}" == "true" ]] &&
+     jq -e 'any(.[]; (.environment_scope // "*") as $scope | $scope != "*" and ($scope | contains("*")))' "${inventory_file}" >/dev/null; then
+    if ! branch_protection_fetch_array GitLab "${GITLAB_URL}/api/v4/projects/${gitlab_project_id}/environments" "${environments_file}"; then
+      printf '[]\n' > "${environments_file}"
+      warn "No se pudo inventariar entornos GitLab; los comodines solo se expandirán a scopes exactos conocidos."
+    fi
+  fi
+  while IFS= read -r variable_json; do
       variable_key="$(jq -r '.key // empty' <<< "${variable_json}")"
       variable_value="$(jq -r '.value // empty' <<< "${variable_json}")"
       variable_type="$(jq -r '.variable_type // "env_var"' <<< "${variable_json}")"
       variable_masked="$(jq -r '.masked // false' <<< "${variable_json}")"
       variable_protected="$(jq -r '.protected // false' <<< "${variable_json}")"
       environment_scope="$(jq -r '.environment_scope // "*"' <<< "${variable_json}")"
+      source_environment_scope="${environment_scope}"
 
       if [[ -z "${variable_key}" ]] ||
          ! validate_github_variable_name "${variable_key}" ||
@@ -1040,15 +1087,31 @@ migrate_project_variables() {
         continue
       fi
 
+      if [[ "${environment_scope}" != "*" && "${MIGRATE_ENVIRONMENT_SCOPED_VARIABLES}" != "true" ]]; then
+        warn "Variable ${variable_key} omitida: migración por entorno desactivada (scope=${environment_scope})."
+        VARIABLES_SKIPPED=$((VARIABLES_SKIPPED + 1))
+        continue
+      fi
+      if ! resolve_variable_environment_scopes "${variable_key}" "${environment_scope}" "${inventory_file}" "${environments_file}" > "${scopes_file}"; then
+        error "Variable ${variable_key}: no se pudieron resolver scopes sin colisiones."
+        variables_with_error=$((variables_with_error + 1))
+        VARIABLES_SKIPPED=$((VARIABLES_SKIPPED + 1))
+        continue
+      fi
+      if [[ ! -s "${scopes_file}" ]]; then
+        warn "Variable ${variable_key} scope=${environment_scope}: sin destinos actuales o sustituida por scopes más específicos."
+        VARIABLES_SKIPPED=$((VARIABLES_SKIPPED + 1))
+        continue
+      fi
+      if [[ "${environment_scope}" != "*" && "${environment_scope}" == *"*"* ]]; then
+        warn "Variable ${variable_key}: scope ${environment_scope} expandido a entornos actuales; los futuros requieren repetir la sincronización."
+      fi
+      while IFS= read -r environment_scope; do
+      environment_scope="${environment_scope%$'\r'}"
       github_environment="REPOSITORY"
       environment_branch_policy=""
 
       if [[ "${environment_scope}" != "*" ]]; then
-        if [[ "${MIGRATE_ENVIRONMENT_SCOPED_VARIABLES}" != "true" ]]; then
-          VARIABLES_SKIPPED=$((VARIABLES_SKIPPED + 1))
-          continue
-        fi
-
         set +e
         environment_mapping="$(resolve_github_environment "${environment_scope}")"
         environment_resolution_code=$?
@@ -1073,6 +1136,7 @@ migrate_project_variables() {
           "${github_repository}" \
           "${github_environment}"; then
           variables_with_error=$((variables_with_error + 1))
+          VARIABLES_SKIPPED=$((VARIABLES_SKIPPED + 1))
           continue
         fi
 
@@ -1081,6 +1145,7 @@ migrate_project_variables() {
           "${github_environment}" \
           "${environment_branch_policy}"; then
           variables_with_error=$((variables_with_error + 1))
+          VARIABLES_SKIPPED=$((VARIABLES_SKIPPED + 1))
           continue
         fi
       fi
@@ -1132,17 +1197,13 @@ migrate_project_variables() {
       fi
 
       VARIABLES_MIGRATED=$((VARIABLES_MIGRATED + 1))
+      success "Variable/Secret importado: ${variable_key}, destino=${github_environment}, scope origen=${source_environment_scope}."
 
       if [[ "${variable_masked}" == "true" || "${variable_protected}" == "true" ]]; then
         info "Variable masked/protected importada: ${variable_key}."
       fi
-    done < <(jq -c '.[]' "${variables_page_file}")
-
-    rm -f "${variables_page_file}"
-
-    [[ -n "${next_page}" ]] || break
-    page="${next_page}"
-  done
+      done < "${scopes_file}"
+  done < <(jq -c '.[]' "${inventory_file}")
 
   if [[ "${variables_with_error}" -gt 0 ]]; then
     error "Variables/secrets con error en ${github_repository}: ${variables_with_error}."
@@ -1152,109 +1213,536 @@ migrate_project_variables() {
   return 0
 }
 
+branch_protection_fetch_array() {
+  local system_name="$1" endpoint="$2" output_file="$3"
+  local page=1 count=0 separator="?" items_file=""
+  [[ "${endpoint}" == *"?"* ]] && separator="&"
+  items_file="$(mktemp "${WORK_ROOT}/protection-items.XXXXXX")"
+  while true; do
+    if ! request_api "${system_name}" GET "${endpoint}${separator}per_page=100&page=${page}" ||
+       ! http_status_is_success "${HTTP_STATUS}" ||
+       ! jq -e 'type == "array"' "${HTTP_BODY}" >/dev/null; then
+      show_http_error "${system_name}" "${endpoint}"
+      rm -f "${items_file}"
+      return 1
+    fi
+    jq -c '.[]' "${HTTP_BODY}" >> "${items_file}"
+    count="$(jq 'length' "${HTTP_BODY}")"
+    [[ "${count}" -lt 100 ]] && break
+    page=$((page + 1))
+  done
+  jq -s '.' "${items_file}" > "${output_file}"
+  rm -f "${items_file}"
+}
+
+branch_protection_read_object() {
+  local system_name="$1" endpoint="$2" output_file="$3"
+  if ! request_api "${system_name}" GET "${endpoint}" ||
+     ! http_status_is_success "${HTTP_STATUS}" ||
+     ! jq -e 'type == "object"' "${HTTP_BODY}" >/dev/null; then
+    show_http_error "${system_name}" "${endpoint}"
+    return 1
+  fi
+  cp "${HTTP_BODY}" "${output_file}"
+}
+
+branch_protection_resolve_user() {
+  local gitlab_user="$1" github_repository="$2" directory="$3"
+  local github_id="" github_login="" gitlab_id=""
+  gitlab_id="$(jq -r '.id // empty' <<< "${gitlab_user}")"
+  [[ "${gitlab_id}" =~ ^[0-9]+$ ]] || return 1
+  if ! branch_protection_read_object GitLab "${GITLAB_URL}/api/v4/users/${gitlab_id}" "${directory}/identity-source.json"; then
+    return 1
+  fi
+  jq -e '.state == "active"' "${directory}/identity-source.json" >/dev/null || return 1
+  github_id="$(jq -r '[.identities[]? | select(.provider == "github") | .extern_uid | tostring] | unique | if length == 1 then .[0] else empty end' "${directory}/identity-source.json")"
+  if [[ "${github_id}" =~ ^[0-9]+$ ]]; then
+    if ! branch_protection_read_object GitHub "${GITHUB_API_URL}/user/${github_id}" "${directory}/identity-target.json" ||
+       ! jq -e --arg id "${github_id}" '(.id | tostring) == $id' "${directory}/identity-target.json" >/dev/null; then
+      return 1
+    fi
+  else
+    if ! branch_protection_read_object GitHub "${GITHUB_API_URL}/user" "${directory}/identity-target.json" ||
+       ! branch_protection_fetch_array GitHub "${GITHUB_API_URL}/user/emails" "${directory}/identity-target-emails.json"; then
+      warn "SKIPPED identidad GitLab ${gitlab_id}: sin vínculo GitHub comprobable; no se infiere por username/sufijo."
+      return 1
+    fi
+    cp "${directory}/identity-source.json" "${directory}/identity-self-source.json"
+    printf '[]\n' > "${directory}/identity-source-emails.json"
+    if ! jq -e '.confirmed_at != null and (.email | type == "string" and length > 0)' "${directory}/identity-source.json" >/dev/null; then
+      if ! branch_protection_read_object GitLab "${GITLAB_URL}/api/v4/user" "${directory}/identity-self-source.json" ||
+         ! jq -e --arg id "${gitlab_id}" '(.id | tostring) == $id and .state == "active"' "${directory}/identity-self-source.json" >/dev/null ||
+         ! branch_protection_fetch_array GitLab "${GITLAB_URL}/api/v4/user/emails" "${directory}/identity-source-emails.json"; then
+        warn "SKIPPED identidad GitLab ${gitlab_id}: la API no expone una identidad/correo confirmado verificable."
+        return 1
+      fi
+    fi
+    if ! jq -en --slurpfile source "${directory}/identity-source-emails.json" \
+      --slurpfile self "${directory}/identity-self-source.json" --slurpfile target "${directory}/identity-target-emails.json" '
+      ([$source[0][] | select(.confirmed_at != null) | .email] +
+        [$self[0] | select(.confirmed_at != null) | .email] | map(select(type == "string" and length > 0) | ascii_downcase)) as $emails
+      | any($target[0][]; .verified == true and (.email | ascii_downcase) as $email | $emails | index($email) != null)
+    ' >/dev/null; then
+      warn "SKIPPED identidad GitLab ${gitlab_id}: no hay correo confirmado común; no se asume equivalencia."
+      return 1
+    fi
+    github_id="$(jq -r '.id // empty' "${directory}/identity-target.json")"
+  fi
+  github_login="$(jq -r '.login // empty' "${directory}/identity-target.json")"
+  [[ "${github_id}" =~ ^[0-9]+$ && "${github_login}" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+  if ! request_api GitHub GET "${GITHUB_API_URL}/repos/${github_repository}/collaborators/${github_login}/permission" ||
+     [[ "${HTTP_STATUS}" != "200" ]] ||
+     ! jq -e --arg id "${github_id}" '(.user.id | tostring) == $id and .user.permissions.push == true' "${HTTP_BODY}" >/dev/null; then
+    warn "SKIPPED identidad ${github_login}: acceso de escritura no verificable; no se conceden permisos."
+    return 1
+  fi
+  jq -cn --argjson id "${github_id}" --arg login "${github_login}" '{actor_id:$id,actor_type:"User",bypass_mode:"always",login:$login}'
+}
+
+branch_protection_resolve_actors() {
+  local entries="$1" members_file="$2" directory="$3" github_repository="$4"
+  local project_file="$5"
+  local entry="" user_id="" group_id="" access_level="" users="[]" group_file=""
+  local gitlab_user="" actor="" actors="[]"
+  if ! jq -e 'type == "array"' <<< "${entries}" >/dev/null; then
+    warn "SKIPPED acceso: lista de autorizaciones desconocida."
+    return 1
+  fi
+  if jq -e 'any(.[]; .user_id != null or .group_id != null or .deploy_key_id != null or .member_role_id != null or
+      (.access_level != 0 and .access_level != 60))' <<< "${entries}" >/dev/null &&
+     ! jq -e 'type == "array"' "${members_file}" >/dev/null; then
+    warn "SKIPPED acceso: membresías efectivas no disponibles; no se asumen actores autorizados."
+    return 1
+  fi
+  while IFS= read -r entry; do
+    if jq -e '.deploy_key_id != null or .member_role_id != null' <<< "${entry}" >/dev/null; then
+      warn "SKIPPED: deploy keys/roles personalizados requieren una traducción explícita de política."
+      return 1
+    fi
+    user_id="$(jq -r '.user_id // empty' <<< "${entry}")"
+    group_id="$(jq -r '.group_id // empty' <<< "${entry}")"
+    access_level="$(jq -r '.access_level // empty' <<< "${entry}")"
+    if [[ -n "${user_id}" ]]; then
+      if ! branch_protection_read_object GitLab "${GITLAB_URL}/api/v4/users/${user_id}" "${WORK_ROOT}/protection-user.json"; then
+        return 1
+      fi
+      users="$(jq '[.]' "${WORK_ROOT}/protection-user.json")"
+      if ! jq -e --argjson id "${user_id}" 'any(.[]; .id == $id and .state == "active" and .access_level >= 30)' "${members_file}" >/dev/null; then
+        warn "SKIPPED: el usuario GitLab ${user_id} no tiene membresía activa con acceso efectivo suficiente."
+        return 1
+      fi
+    elif [[ -n "${group_id}" ]]; then
+      if ! jq -e --argjson id "${group_id}" 'any(.shared_with_groups[]?; .group_id == $id and .group_access_level >= 30)' "${project_file}" >/dev/null; then
+        warn "SKIPPED: el proyecto no está compartido directamente con el grupo ${group_id} con nivel suficiente."
+        return 1
+      fi
+      group_file="$(mktemp "${directory}/protection-group.XXXXXX")"
+      if ! branch_protection_fetch_array GitLab "${GITLAB_URL}/api/v4/groups/${group_id}/members" "${group_file}"; then
+        return 1
+      fi
+      users="$(jq --slurpfile members "${members_file}" '[.[] | . as $user | select(.state == "active" and .access_level >= 30 and
+        any($members[0][]; .id == $user.id and .state == "active" and .access_level >= 30))]' "${group_file}")"
+      warn "Grupo GitLab ${group_id}: se conserva una instantánea de miembros; no se crea ni amplía un equipo GitHub."
+    elif [[ "${access_level}" == "0" ]]; then
+      continue
+    elif [[ "${access_level}" == "60" ]]; then
+      group_file="$(mktemp "${directory}/protection-admins.XXXXXX")"
+      if ! branch_protection_fetch_array GitLab "${GITLAB_URL}/api/v4/users?admins=true" "${group_file}" ||
+         ! jq -e 'length > 0 and all(.[]; .is_admin == true)' "${group_file}" >/dev/null; then
+        warn "SKIPPED rol 60: no se pudo consultar/verificar la lista de administradores GitLab; no se traduce a administradores GitHub."
+        return 1
+      fi
+      users="$(jq '[.[] | select(.state == "active")]' "${group_file}")"
+      warn "Rol GitLab 60: se comprueban administradores concretos, sin otorgar permisos administrativos GitHub."
+    elif [[ "${access_level}" == "30" || "${access_level}" == "40" || "${access_level}" == "50" ]]; then
+      jq -e 'type == "array"' "${members_file}" >/dev/null || return 1
+      users="$(jq --argjson level "${access_level}" '[.[] | select(.access_level >= $level and .state == "active")]' "${members_file}")"
+      warn "Rol GitLab ${access_level}: se resuelven miembros actuales, no un permiso de repositorio GitHub."
+    else
+      warn "SKIPPED: nivel de acceso desconocido o ausente: ${entry}."
+      return 1
+    fi
+    while IFS= read -r gitlab_user; do
+      if ! actor="$(branch_protection_resolve_user "${gitlab_user}" "${github_repository}" "${directory}")"; then
+        return 1
+      fi
+      actors="$(jq -cn --argjson actors "${actors}" --argjson actor "${actor}" '$actors + [$actor | del(.login)] | unique_by(.actor_id)')"
+    done < <(jq -c '.[] | select(.state == "active")' <<< "${users}")
+  done < <(jq -c '.[]' <<< "${entries}")
+  printf '%s\n' "${actors}"
+}
+
+branch_protection_verify_ruleset() {
+  local expected="$1" actual_file="$2"
+  jq -e --argjson expected "${expected}" '
+    def policy: {name,target,enforcement,conditions,
+      bypass_actors: ((.bypass_actors // []) | sort_by(.actor_type,.actor_id,.bypass_mode)),
+      rules: ((.rules // []) | sort_by(.type))};
+    has("bypass_actors") and (policy == ($expected | policy))
+  ' "${actual_file}" >/dev/null
+}
+
+branch_protection_verify_codeowners() {
+  local gitlab_project_id="$1" github_repository="$2" branch_name="$3"
+  local directory="$4" path="" source_blob="" target_blob="" source_path="" content=""
+  local owner="" actor="" user="" users_file="${directory}/codeowner-users.json"
+  for path in CODEOWNERS docs/CODEOWNERS .gitlab/CODEOWNERS; do
+    if ! request_api GitLab GET "${GITLAB_URL}/api/v4/projects/${gitlab_project_id}/repository/files/$(url_encode "${path}")?ref=$(url_encode "${branch_name}")"; then
+      return 1
+    fi
+    if [[ "${HTTP_STATUS}" == "200" ]]; then
+      source_blob="$(jq -r '.blob_id // empty' "${HTTP_BODY}")"
+      content="$(jq -r '.content | @base64d' "${HTTP_BODY}")" || return 1
+      source_path="${path}"
+      break
+    fi
+    [[ "${HTTP_STATUS}" == "404" ]] || return 1
+  done
+  [[ "${source_blob}" =~ ^[0-9a-f]{40,64}$ ]] || return 1
+  if ! jq -en --arg content "${content}" '
+    [$content | split("\n")[] | sub("#.*$"; "") | gsub("\r"; "")
+      | [splits("[ \t]+") | select(length > 0)] | select(length > 0)] as $lines
+    | ($lines | length > 0) and all($lines[];
+        length >= 2 and (.[0] | test("^[!\\[\\^]|\\\\") | not) and
+        all(.[1:][]; test("^@[A-Za-z0-9-]+$")))
+  ' >/dev/null; then
+    warn "SKIPPED Code Owners: sintaxis avanzada o grupos sin equivalencia comprobable."
+    return 1
+  fi
+  while IFS= read -r owner; do
+    if ! branch_protection_fetch_array GitLab "${GITLAB_URL}/api/v4/users?username=$(url_encode "${owner}")" "${users_file}" ||
+       ! jq -e --arg owner "${owner}" '[.[] | select(.username == $owner and .state == "active")] | length == 1' "${users_file}" >/dev/null; then
+      return 1
+    fi
+    user="$(jq -c --arg owner "${owner}" '.[] | select(.username == $owner and .state == "active")' "${users_file}")"
+    if ! actor="$(branch_protection_resolve_user "${user}" "${github_repository}" "${directory}")" ||
+       ! jq -e --arg owner "${owner}" '(.login | ascii_downcase) == ($owner | ascii_downcase)' <<< "${actor}" >/dev/null; then
+      warn "SKIPPED Code Owners: identidad ${owner} no verificable o requiere modificar CODEOWNERS."
+      return 1
+    fi
+  done < <(jq -nr --arg content "${content}" '[$content | split("\n")[] | sub("#.*$"; "") | [splits("[ \t\r]+") | select(length > 0)] | .[1:][] | ltrimstr("@")] | unique[]')
+  for path in .github/CODEOWNERS CODEOWNERS docs/CODEOWNERS; do
+    if ! request_api GitHub GET "${GITHUB_API_URL}/repos/${github_repository}/contents/${path}?ref=$(url_encode "${branch_name}")"; then
+      return 1
+    fi
+    if [[ "${HTTP_STATUS}" == "200" ]]; then
+      target_blob="$(jq -r '.sha // empty' "${HTTP_BODY}")"
+      break
+    fi
+    [[ "${HTTP_STATUS}" == "404" ]] || return 1
+  done
+  if [[ "${source_blob}" != "${target_blob}" ]]; then
+    warn "SKIPPED Code Owners: ${source_path} no coincide con el archivo efectivo de GitHub."
+    return 1
+  fi
+  if ! request_api GitHub GET "${GITHUB_API_URL}/repos/${github_repository}/codeowners/errors?ref=$(url_encode "${branch_name}")" ||
+     [[ "${HTTP_STATUS}" != "200" ]] || ! jq -e '.errors == []' "${HTTP_BODY}" >/dev/null; then
+    return 1
+  fi
+}
+
+branch_protection_discover_checks() {
+  local gitlab_project_id="$1" github_repository="$2" branch_name="$3" directory="$4"
+  local sha="" pipeline_id="" checks_file="${directory}/check-runs.ndjson" page=1
+  if [[ "${branch_name}" == *"*"* || "${branch_name}" == *"?"* || "${branch_name}" == *"["* ]]; then
+    warn "SKIPPED pipeline ${branch_name}: no se puede demostrar cobertura futura del patrón."
+    return 1
+  fi
+  if ! branch_protection_read_object GitLab "${GITLAB_URL}/api/v4/projects/${gitlab_project_id}/repository/branches/$(url_encode "${branch_name}")" "${directory}/check-source-branch.json" ||
+     ! branch_protection_read_object GitHub "${GITHUB_API_URL}/repos/${github_repository}/branches/$(url_encode "${branch_name}")" "${directory}/check-target-branch.json"; then
+    return 1
+  fi
+  sha="$(jq -r '.commit.id // empty' "${directory}/check-source-branch.json")"
+  [[ "${sha}" =~ ^[0-9a-f]{40,64}$ ]] || return 1
+  jq -e --arg sha "${sha}" '.commit.sha == $sha' "${directory}/check-target-branch.json" >/dev/null || return 1
+  if ! branch_protection_fetch_array GitLab "${GITLAB_URL}/api/v4/projects/${gitlab_project_id}/pipelines?ref=$(url_encode "${branch_name}")&sha=${sha}" "${directory}/check-pipelines.json"; then
+    return 1
+  fi
+  pipeline_id="$(jq -r 'sort_by(.id) | last | select(.source == "external") | .id // empty' "${directory}/check-pipelines.json")"
+  if [[ ! "${pipeline_id}" =~ ^[0-9]+$ ]]; then
+    warn "SKIPPED pipeline ${branch_name}: un pipeline GitLab nativo no identifica checks GitHub equivalentes."
+    return 1
+  fi
+  if ! branch_protection_fetch_array GitLab "${GITLAB_URL}/api/v4/projects/${gitlab_project_id}/repository/commits/${sha}/statuses?all=false" "${directory}/check-statuses.json"; then
+    return 1
+  fi
+  : > "${checks_file}"
+  while true; do
+    if ! request_api GitHub GET "${GITHUB_API_URL}/repos/${github_repository}/commits/${sha}/check-runs?per_page=100&page=${page}" ||
+       [[ "${HTTP_STATUS}" != "200" ]] || ! jq -e '.check_runs | type == "array"' "${HTTP_BODY}" >/dev/null; then
+      return 1
+    fi
+    jq -c '.check_runs[]' "${HTTP_BODY}" >> "${checks_file}"
+    [[ "$(jq '.check_runs | length' "${HTTP_BODY}")" -lt 100 ]] && break
+    page=$((page + 1))
+  done
+  if ! jq -en --argjson pipeline "${pipeline_id}" --slurpfile statuses "${directory}/check-statuses.json" --slurpfile runs "${checks_file}" '
+    [$statuses[0][] | select(.pipeline_id == $pipeline and .allow_failure == false)] as $required
+    | ($required | length > 0) and all($required[]; . as $status |
+        any($runs[]; .name == $status.name and .html_url == $status.target_url and (.app.id | type == "number")))
+  ' >/dev/null; then
+    warn "SKIPPED pipeline ${branch_name}: faltan vínculos exactos entre estados GitLab y checks GitHub."
+    return 1
+  fi
+  jq -cn --argjson pipeline "${pipeline_id}" --slurpfile statuses "${directory}/check-statuses.json" --slurpfile runs "${checks_file}" '
+    [$statuses[0][] | select(.pipeline_id == $pipeline and .allow_failure == false) | . as $status |
+      $runs[] | select(.name == $status.name and .html_url == $status.target_url) |
+      {context:.name,integration_id:.app.id}] | unique_by(.context,.integration_id)'
+}
+
+branch_protection_apply_ruleset() {
+  local github_repository="$1" payload="$2" rulesets_file="$3" evidence_file="$4"
+  local endpoint="${GITHUB_API_URL}/repos/${github_repository}/rulesets" ruleset_id="" name=""
+  if ! jq -e 'type == "array"' "${rulesets_file}" >/dev/null; then
+    branch_protection_fetch_array GitHub "${endpoint}" "${rulesets_file}" || return 1
+  fi
+  name="$(jq -r '.name' <<< "${payload}")"
+  ruleset_id="$(jq -r --arg name "${name}" '.[] | select(.name == $name) | .id' "${rulesets_file}")"
+  if [[ -n "${ruleset_id}" ]]; then
+    [[ "${ruleset_id}" =~ ^[0-9]+$ ]] || return 1
+    if ! branch_protection_read_object GitHub "${endpoint}/${ruleset_id}" "${WORK_ROOT}/protection-existing.json" ||
+       ! branch_protection_verify_ruleset "${payload}" "${WORK_ROOT}/protection-existing.json"; then
+      warn "SKIPPED: ruleset ${name} existente difiere o no es consultable; no se sobrescribe."
+      return 1
+    fi
+  else
+    jq -cn --argjson payload "${payload}" '{estado:"ATTEMPT",github:$payload}' >> "${evidence_file}"
+    if ! request_api GitHub POST "${endpoint}" "${payload}" || [[ "${HTTP_STATUS}" != "201" ]]; then
+      show_http_error GitHub "${endpoint}"
+      return 1
+    fi
+    ruleset_id="$(jq -r '.id // empty' "${HTTP_BODY}")"
+    [[ "${ruleset_id}" =~ ^[0-9]+$ ]] || return 1
+  fi
+  if ! branch_protection_read_object GitHub "${endpoint}/${ruleset_id}" "${WORK_ROOT}/protection-verified.json" ||
+     ! branch_protection_verify_ruleset "${payload}" "${WORK_ROOT}/protection-verified.json"; then
+    error "Validación posterior fallida: ${name}. No se cuenta como migrado."
+    return 1
+  fi
+  jq -cn --argjson payload "${payload}" --argjson id "${ruleset_id}" '{estado:"VERIFIED",id:$id,github:$payload}' >> "${evidence_file}"
+  jq --argjson policy "$(jq -c '.' "${WORK_ROOT}/protection-verified.json")" '. + [$policy] | unique_by(.id)' "${rulesets_file}" > "${rulesets_file}.next"
+  mv "${rulesets_file}.next" "${rulesets_file}"
+}
+
 migrate_branch_protections() {
   local gitlab_project_id="$1"
   local github_repository="$2"
-  local endpoint=""
-  local branches_file=""
-  local branch_json=""
-  local branch_name=""
-  local branch_encoded=""
-  local allow_force_push=""
-  local code_owner_required=""
-  local review_rules="null"
-  local payload=""
-
   [[ "${MIGRATE_BRANCH_PROTECTIONS}" == "true" ]] || return 0
   [[ "${DRY_RUN}" == "false" ]] || return 0
-
-  endpoint="${GITLAB_URL}/api/v4/projects/${gitlab_project_id}/protected_branches"
-
-  if ! request_api "GitLab" "GET" "${endpoint}"; then
+  local directory="" branch_json="" branch_name="" pattern="" reason="" failed=0
+  local push_actors="[]" merge_actors="[]" access_actors="[]" payloads="" payload=""
+  local approvals="[]" approval_count=0 corequired=false checks="[]" rule_key="" approvals_known=false
+  local approvals_display="" force_display="" verified_for_branch=0 verified_rulesets=0
+  local push_known=false merge_known=false access_known=false reviews_needed=false
+  local dismiss_stale=false resolve_threads=false safety_rules="[]" review_rules="[]"
+  local endpoint="${GITLAB_URL}/api/v4/projects/${gitlab_project_id}"
+  local evidence_file="" resource="" output=""
+  directory="$(mktemp -d "${WORK_ROOT}/protections.XXXXXX")"
+  evidence_file="$(mktemp "${LOG_DIRECTORY}/branch-protections-${gitlab_project_id}.XXXXXX.ndjson")"
+  info "Evidencia de protecciones: ${evidence_file}"
+  if ! branch_protection_fetch_array GitLab "${endpoint}/protected_branches" "${directory}/branches.json"; then
     return 1
   fi
-
-  if ! http_status_is_success "${HTTP_STATUS}"; then
-    show_http_error "GitLab" "${endpoint}"
-    return 1
+  if [[ "$(jq 'length' "${directory}/branches.json")" == "0" ]]; then
+    info "Sin ramas protegidas en GitLab; no se modifica GitHub."
+    return 0
   fi
-
-  branches_file="$(mktemp "${WORK_ROOT}/protected-branches.XXXXXX.json")"
-  cp "${HTTP_BODY}" "${branches_file}"
-
+  for resource in project settings; do
+    output="${directory}/${resource}.json"
+    if [[ "${resource}" == "project" ]]; then
+      if branch_protection_read_object GitLab "${endpoint}" "${output}"; then continue; fi
+    else
+      if branch_protection_read_object GitLab "${endpoint}/approvals" "${output}"; then continue; fi
+    fi
+    printf '{}\n' > "${output}"
+    warn "SKIPPED inventario ${resource}: se intentarán los demás componentes conocidos."
+  done
+  if ! branch_protection_fetch_array GitLab "${endpoint}/approval_rules" "${directory}/approvals.json"; then
+    printf 'null\n' > "${directory}/approvals.json"
+  fi
+  if ! branch_protection_fetch_array GitLab "${endpoint}/members/all" "${directory}/members.json"; then
+    printf 'null\n' > "${directory}/members.json"
+  fi
+  if ! branch_protection_fetch_array GitHub "${GITHUB_API_URL}/repos/${github_repository}/rulesets" "${directory}/rulesets.json"; then
+    printf 'null\n' > "${directory}/rulesets.json"
+  fi
+  jq -cn --slurpfile project "${directory}/project.json" --slurpfile settings "${directory}/settings.json" \
+    --slurpfile approvals "${directory}/approvals.json" \
+    '{estado:"INVENTORY",proyecto:($project[0] | {id,shared_with_groups,only_allow_merge_if_pipeline_succeeds,
+      only_allow_merge_if_all_discussions_are_resolved}),
+      settings:($settings[0] | {approvals_before_merge,reset_approvals_on_push,selective_code_owner_removals,
+        merge_requests_author_approval,merge_requests_disable_committers_approval,
+        require_reauthentication_to_approve,require_password_to_approve}),approvals:$approvals[0]}' >> "${evidence_file}"
   while IFS= read -r branch_json; do
     branch_name="$(jq -r '.name // empty' <<< "${branch_json}")"
-    allow_force_push="$(jq -r '.allow_force_push // false' <<< "${branch_json}")"
-    code_owner_required="$(jq -r '.code_owner_approval_required // false' <<< "${branch_json}")"
-
-    [[ -z "${branch_name}" ]] && continue
-
-    if [[ "${branch_name}" == *"*"* ||
-          "${branch_name}" == *"?"* ||
-          "${branch_name}" == *"["* ]]; then
-      warn "Regla wildcard GitLab no migrada automáticamente: ${branch_name}."
+    reason=""
+    jq -cn --argjson source "${branch_json}" '{estado:"SOURCE",gitlab:$source}' >> "${evidence_file}"
+    if ! jq -e '(.id | type == "number" and . > 0 and floor == .) and (.name | type == "string" and length > 0)' <<< "${branch_json}" >/dev/null; then
+      reason="identificador/nombre de regla ausente o inválido"
+    fi
+    pattern="refs/heads/${branch_name}"
+    if [[ "${branch_name}" == *"?"* || "${branch_name}" == *"["* || "${branch_name}" == *"\\"* ]]; then
+      reason="patrón no traducible con seguridad a fnmatch GitHub"
+    elif [[ "${branch_name}" == *"*"* ]]; then
+      if [[ "${branch_name}" != "*" && "${branch_name}" != */\* ]] || [[ "${branch_name%\*}" == *"*"* ]]; then
+        reason="solo se admite * o un prefijo de directorio seguido de /*; requiere revisión de equivalencia"
+      else
+        pattern="refs/heads/${branch_name%\*}**/*"
+      fi
+    fi
+    if [[ -n "${reason}" ]]; then
+      warn "SKIPPED ${github_repository}/${branch_name}: ${reason}."
+      jq -cn --arg branch "${branch_name}" --arg reason "${reason}" '{estado:"SKIPPED",rama:$branch,motivo:$reason}' >> "${evidence_file}"
       PROTECTIONS_SKIPPED=$((PROTECTIONS_SKIPPED + 1))
+      failed=1
       continue
     fi
-
-    branch_encoded="$(url_encode "${branch_name}")"
-
-    if [[ "${code_owner_required}" == "true" ]]; then
-      review_rules='{
-        "dismissal_restrictions": null,
-        "dismiss_stale_reviews": false,
-        "require_code_owner_reviews": true,
-        "required_approving_review_count": 1,
-        "require_last_push_approval": false,
-        "bypass_pull_request_allowances": null
-      }'
+    safety_rules='[{"type":"deletion"}]'
+    if jq -e '.allow_force_push == false' <<< "${branch_json}" >/dev/null; then
+      safety_rules="$(jq -c '. + [{type:"non_fast_forward"}]' <<< "${safety_rules}")"
+    elif ! jq -e '.allow_force_push == true' <<< "${branch_json}" >/dev/null; then
+      reason+="force push desconocido; "
+    fi
+    push_known=false
+    merge_known=false
+    access_known=false
+    push_actors="[]"
+    merge_actors="[]"
+    if push_actors="$(branch_protection_resolve_actors "$(jq -c '.push_access_levels' <<< "${branch_json}")" "${directory}/members.json" "${directory}" "${github_repository}" "${directory}/project.json")"; then
+      push_known=true
     else
-      review_rules="null"
+      push_actors="[]"
+      reason+="actores de push no verificables automáticamente; "
     fi
-
-    payload="$(
-      jq -cn \
-        --argjson allow_force_pushes "${allow_force_push}" \
-        --argjson review_rules "${review_rules}" \
-        '{
-          required_status_checks: null,
-          enforce_admins: false,
-          required_pull_request_reviews: $review_rules,
-          restrictions: null,
-          required_linear_history: false,
-          allow_force_pushes: $allow_force_pushes,
-          allow_deletions: false,
-          block_creations: false,
-          required_conversation_resolution: false,
-          lock_branch: false,
-          allow_fork_syncing: false
-        }'
-    )"
-
-    if ! request_api \
-      "GitHub" \
-      "PUT" \
-      "${GITHUB_API_URL}/repos/${github_repository}/branches/${branch_encoded}/protection" \
-      "${payload}"; then
-      rm -f "${branches_file}"
-      return 1
+    if merge_actors="$(branch_protection_resolve_actors "$(jq -c '.merge_access_levels' <<< "${branch_json}")" "${directory}/members.json" "${directory}" "${github_repository}" "${directory}/project.json")"; then
+      merge_known=true
+    else
+      merge_actors="[]"
+      reason+="actores de merge no verificables automáticamente; "
     fi
-
-    if ! http_status_is_success "${HTTP_STATUS}"; then
-      show_http_error \
-        "GitHub" \
-        "${GITHUB_API_URL}/repos/${github_repository}/branches/${branch_encoded}/protection"
-
-      rm -f "${branches_file}"
-      return 1
+    if [[ "${push_known}" == "true" && "${merge_known}" == "true" ]]; then
+      access_known=true
     fi
-
+    access_actors="$(jq -cn --argjson push "${push_actors}" --argjson merge "${merge_actors}" '$push + ($merge | map(.bypass_mode="pull_request")) | unique_by(.actor_id) | map(. as $actor | if any($push[]; .actor_id == $actor.actor_id) then .bypass_mode="always" else . end)')"
+    reviews_needed=false
+    if [[ "${push_known}" == "true" && "${push_actors}" == "[]" ]]; then reviews_needed=true; fi
+    approval_count=0
+    approvals_known=false
+    if jq -e 'type == "array"' "${directory}/approvals.json" >/dev/null; then
+      approvals="$(jq -c --argjson branch "${branch_json}" '[.[] | select(
+        .applies_to_all_protected_branches == true or ((.protected_branches // []) | length == 0) or
+        any(.protected_branches[]?; .id == $branch.id or .name == $branch.name))]' "${directory}/approvals.json")"
+      if jq -e 'all(.[]; (.approvals_required | type == "number" and . >= 0 and floor == .)) and
+          all(.[]; .approvals_required == 0 or (.rule_type == "any_approver" and .contains_hidden_groups != true and
+            ((.users // []) | length == 0) and ((.groups // []) | length == 0)))' <<< "${approvals}" >/dev/null; then
+        approval_count="$(jq '[.[].approvals_required] | max // 0' <<< "${approvals}")"
+        approvals_known=true
+      else
+        reason+="approvals específicos/reportes/cantidades no equivalentes; "
+      fi
+    else
+      reason+="API approval_rules no disponible; "
+    fi
+    if jq -e '.approvals_before_merge | type == "number" and . >= 0 and floor == .' "${directory}/settings.json" >/dev/null; then
+      approval_count="$(jq --argjson count "${approval_count}" '[.approvals_before_merge,$count] | max' "${directory}/settings.json")"
+      approvals_known=true
+    elif [[ "${approvals_known}" != "true" ]] &&
+         jq -e '.approvals_before_merge | type == "number" and . >= 0 and floor == .' "${directory}/project.json" >/dev/null; then
+      approval_count="$(jq -r '.approvals_before_merge' "${directory}/project.json")"
+      approvals_known=true
+      warn "${branch_name}: se recuperó la cantidad legacy de approvals desde los datos del proyecto; reglas específicas/reset siguen sin comprobarse."
+    fi
+    if [[ "${approval_count}" -gt 10 ]]; then
+      reason+="más de 10 approvals no soportados; "
+      approval_count=0
+    fi
+    [[ "${approval_count}" -gt 0 ]] && reviews_needed=true
+    dismiss_stale=false
+    if jq -e '.reset_approvals_on_push | type == "boolean"' "${directory}/settings.json" >/dev/null; then
+      dismiss_stale="$(jq -r '.reset_approvals_on_push' "${directory}/settings.json")"
+      [[ "${dismiss_stale}" == "true" ]] && reviews_needed=true
+    else
+      reason+="reset de approvals no determinado; "
+    fi
+    if jq -e '.merge_requests_disable_committers_approval == true or .selective_code_owner_removals == true or
+        .require_reauthentication_to_approve == true or .require_password_to_approve == true' "${directory}/settings.json" >/dev/null; then
+      reason+="restricciones de committers/reset selectivo/reautenticación sin equivalente 1:1; "
+    fi
+    resolve_threads=false
+    if jq -e '.only_allow_merge_if_all_discussions_are_resolved | type == "boolean"' "${directory}/project.json" >/dev/null; then
+      resolve_threads="$(jq -r '.only_allow_merge_if_all_discussions_are_resolved' "${directory}/project.json")"
+      [[ "${resolve_threads}" == "true" ]] && reviews_needed=true
+    else
+      reason+="conversaciones no determinadas; "
+    fi
+    corequired=false
+    if jq -e '.code_owner_approval_required == true' <<< "${branch_json}" >/dev/null; then
+      if [[ "${push_known}" == "true" && "${push_actors}" == "[]" && "${branch_name}" != *"*"* ]] &&
+         branch_protection_verify_codeowners "${gitlab_project_id}" "${github_repository}" "${branch_name}" "${directory}"; then
+        corequired=true
+        reviews_needed=true
+        [[ "${approval_count}" -lt 1 ]] && approval_count=1
+      else
+        reason+="Code Owners no verificable/equivalente para esta rama; "
+      fi
+    elif ! jq -e '.code_owner_approval_required == false' <<< "${branch_json}" >/dev/null; then
+      reason+="Code Owners desconocido; "
+    fi
+    checks="[]"
+    if jq -e '.only_allow_merge_if_pipeline_succeeds == true' "${directory}/project.json" >/dev/null; then
+      if ! checks="$(branch_protection_discover_checks "${gitlab_project_id}" "${github_repository}" "${branch_name}" "${directory}")"; then
+        checks="[]"
+        reason+="pipeline obligatorio sin vínculo verificable con checks GitHub; "
+      fi
+    elif ! jq -e '.only_allow_merge_if_pipeline_succeeds == false' "${directory}/project.json" >/dev/null; then
+      reason+="pipeline obligatorio no determinado; "
+    fi
+    rule_key="gitlab-${gitlab_project_id}-$(jq -r '.id // empty' <<< "${branch_json}")"
+    review_rules="$(jq -cn --argjson needed "${reviews_needed}" --argjson stale "${dismiss_stale}" \
+      --argjson owner "${corequired}" --argjson count "${approval_count}" --argjson threads "${resolve_threads}" '
+      if $needed then [{type:"pull_request",parameters:{dismiss_stale_reviews_on_push:$stale,
+        require_code_owner_review:$owner,require_last_push_approval:false,required_approving_review_count:$count,
+        required_review_thread_resolution:$threads}}] else [] end')"
+    payloads="$(jq -cn --arg key "${rule_key}" --arg pattern "${pattern}" --argjson safety "${safety_rules}" \
+      --argjson access "${access_actors}" --argjson push "${push_actors}" --argjson access_known "${access_known}" \
+      --argjson reviews "${review_rules}" --argjson checks "${checks}" '
+      def policy($suffix; $actors; $rules): {name:($key + $suffix),target:"branch",enforcement:"active",
+        bypass_actors:$actors,conditions:{ref_name:{include:[$pattern],exclude:[]}},rules:$rules};
+      [policy("-safety"; []; $safety),
+       policy("-access"; $access; if $access_known then [{type:"creation"},{type:"update",parameters:{update_allows_fetch_and_merge:false}}] else [] end),
+       policy("-reviews"; $push; $reviews),
+       policy("-checks"; []; if ($checks | length) > 0 then [{type:"required_status_checks",parameters:{
+         required_status_checks:$checks,strict_required_status_checks_policy:false}}] else [] end)]
+      | map(select(.rules | length > 0))')"
+    approvals_display="NO_DETERMINADO"
+    [[ "${approvals_known}" == "true" ]] && approvals_display="${approval_count}"
+    force_display="$(jq -r 'if .allow_force_push == true then "true" elif .allow_force_push == false then "false" else "NO_DETERMINADO" end' <<< "${branch_json}")"
+    info "Protección ${branch_name}: force_push origen=${force_display}, approvals determinados=${approvals_display}, CodeOwners aplicado=${corequired}; rulesets aditivos."
+    if jq -e '.inherited == true' <<< "${branch_json}" >/dev/null; then
+      warn "${branch_name}: política heredada convertida en instantánea local; no replica gobierno de grupo."
+    fi
+    warn "${branch_name}: reglas existentes permanecen intactas; reglas superpuestas pueden ser más restrictivas. require_last_push_approval no se infiere de GitLab."
+    verified_for_branch=0
+    while IFS= read -r payload; do
+      if ! branch_protection_apply_ruleset "${github_repository}" "${payload}" "${directory}/rulesets.json" "${evidence_file}"; then
+        reason+="falló aplicación/verificación $(jq -r '.name' <<< "${payload}"); "
+      else
+        verified_for_branch=$((verified_for_branch + 1))
+        verified_rulesets=$((verified_rulesets + 1))
+      fi
+    done < <(jq -c '.[]' <<< "${payloads}")
+    if [[ -n "${reason}" ]]; then
+      warn "Protección incompleta ${github_repository}/${branch_name}: ${verified_for_branch} rulesets VERIFIED; SKIPPED: ${reason}."
+      jq -cn --arg branch "${branch_name}" --arg reason "${reason}" '{estado:"SKIPPED",rama:$branch,motivo:$reason}' >> "${evidence_file}"
+      PROTECTIONS_SKIPPED=$((PROTECTIONS_SKIPPED + 1))
+      failed=1
+      continue
+    fi
     PROTECTIONS_MIGRATED=$((PROTECTIONS_MIGRATED + 1))
-    success "Protección de rama migrada: ${github_repository}/${branch_name}."
-  done < <(jq -c '.[]' "${branches_file}")
-
-  rm -f "${branches_file}"
-  return 0
+    success "Protección de rama migrada y verificada: ${github_repository}/${branch_name}."
+  done < <(jq -c '.[]' "${directory}/branches.json")
+  info "Rulesets aplicados/reutilizados y verificados en ${github_repository}: ${verified_rulesets}. El contador de protecciones migradas exige la regla completa."
+  return "${failed}"
 }
 
 map_gitlab_access_to_github_permission() {
@@ -1922,6 +2410,8 @@ print_summary() {
 }
 
 main() {
+  local github_login=""
+
   require_command bash
   require_command curl
   require_command jq
@@ -1933,7 +2423,6 @@ main() {
   require_command tee
   require_command grep
 
-  [[ -n "${OWNER}" ]] || fatal "Falta OWNER."
   [[ -n "${GITLAB_URL}" ]] || fatal "Falta GITLAB_URL."
   [[ -n "${TOKEN_GITLAB}" ]] || fatal "Falta TOKEN_GITLAB."
   [[ -n "${TOKEN_GITHUB}" ]] || fatal "Falta TOKEN_GITHUB."
@@ -2020,7 +2509,6 @@ main() {
   fi
 
   info "Inicio de migración GitLab -> GitHub."
-  info "Organización GitHub: ${OWNER}"
   info "Grupo GitLab: ${GROUP_GITLAB:-No especificado}"
   info "Lista repositorios: ${REPOSITORIES_FILE:-No especificada}"
   info "LFS_MODE: ${LFS_MODE}"
@@ -2032,14 +2520,24 @@ main() {
   if ! request_api \
     "GitHub" \
     "GET" \
-    "${GITHUB_API_URL}/orgs/$(url_encode "${OWNER}")"; then
+    "${GITHUB_API_URL}/user"; then
     fatal "No fue posible conectar con GitHub."
   fi
 
   if ! http_status_is_success "${HTTP_STATUS}"; then
-    show_http_error "GitHub" "${GITHUB_API_URL}/orgs/$(url_encode "${OWNER}")"
-    fatal "No se pudo validar organización GitHub."
+    show_http_error "GitHub" "${GITHUB_API_URL}/user"
+    fatal "No se pudo validar TOKEN_GITHUB."
   fi
+
+  github_login="$(jq -r '.login // empty' "${HTTP_BODY}")"
+  [[ -n "${github_login}" ]] || fatal "GitHub no devolvió el usuario asociado a TOKEN_GITHUB."
+
+  if [[ -n "${OWNER}" && "${github_login,,}" != "${OWNER,,}" ]]; then
+    warn "OWNER=${OWNER} no coincide con el token; se usará la cuenta personal ${github_login}."
+  fi
+
+  OWNER="${github_login}"
+  info "Cuenta GitHub destino detectada: ${OWNER}"
 
   if ! request_api "GitLab" "GET" "${GITLAB_URL}/api/v4/user"; then
     fatal "No fue posible conectar con GitLab."

@@ -33,6 +33,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly SCRIPT_NAME="$(basename "$0")"
+readonly SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly START_TIME="$(date '+%Y-%m-%d %H:%M:%S')"
 
 GITLAB_URL="${GITLAB_URL:-}"
@@ -61,7 +62,7 @@ BRANCH_PROTECTIONS_REQUIRED="${BRANCH_PROTECTIONS_REQUIRED:-false}"
 MIGRATE_REPOSITORY_MEMBERS="${MIGRATE_REPOSITORY_MEMBERS:-false}"
 MEMBERS_REQUIRED="${MEMBERS_REQUIRED:-false}"
 ALLOW_GITHUB_ADMIN_PERMISSION="${ALLOW_GITHUB_ADMIN_PERMISSION:-false}"
-GITHUB_USERNAME_SUFFIX="${GITHUB_USERNAME_SUFFIX:-_bexca}"
+GITHUB_USERNAME_SUFFIX="${GITHUB_USERNAME_SUFFIX:-}"
 
 LFS_MODE="${LFS_MODE:-report}"
 
@@ -74,7 +75,10 @@ PIPELINE_REPORT_DIRECTORY="${PIPELINE_REPORT_DIRECTORY:-}"
 
 OUTPUT_DIRECTORY="${OUTPUT_DIRECTORY:-$(pwd)/certificacion-$(date +%Y%m%d-%H%M%S)}"
 LOG_FILE="${OUTPUT_DIRECTORY}/certificacion.log"
-JSON_REPORT_FILE="${OUTPUT_DIRECTORY}/errores-certificacion.json"
+JSON_REPORT_FILE=""
+EXCEL_REPORT_FILE="${OUTPUT_DIRECTORY}/reporte-migracion.xlsx"
+PYTHON_BIN="${PYTHON_BIN:-}"
+PYTHON_PLATFORM=""
 
 WORK_ROOT=""
 PROJECTS_FILE=""
@@ -1989,8 +1993,34 @@ generate_json_report() {
     --argjson proyectos_error "${FAILED_PROJECTS}" \
     --argjson proyectos_omitidos "${SKIPPED_PROJECTS}" \
     --slurpfile resultados "${RESULTS_NDJSON}" \
+    --slurpfile proyectos "${PROJECTS_FILE}" \
     --slurpfile incidencias "${EVENTS_NDJSON}" \
-    '{
+    '($resultados + [
+      $proyectos[]
+      | (.path // "SIN_REPOSITORIO") as $nombre
+      | select(any($resultados[]; .repositorio == $nombre) | not)
+      | {
+          repositorio: $nombre,
+          resultado: "ERROR",
+          validaciones: {disponibilidad_para_certificar: "NO_EVALUADO"},
+          metadatos: {},
+          detalle: "No se pudo completar la certificación; consulte las incidencias."
+        }
+    ] | map(
+      ([.validaciones[], .metadatos[]]
+        | map(select(startswith("NO_APLICA") | not))) as $aplicables
+      | ($aplicables | map(select(. == "OK")) | length) as $correctas
+      | . + {
+          progreso_verificado: {
+            porcentaje: (if ($aplicables | length) == 0 then null
+              else (($correctas * 10000 / ($aplicables | length)) | round) / 100 end),
+            comprobaciones_ok: $correctas,
+            comprobaciones_aplicables: ($aplicables | length),
+            criterio: "Porcentaje de comprobaciones aplicables en OK, con igual peso; no mide bytes ni archivos transferidos."
+          }
+        }
+    )) as $resultados_con_progreso
+    | {
       metadatos: {
         script: $script,
         fecha_generacion: $fecha_generacion,
@@ -2026,16 +2056,31 @@ generate_json_report() {
         proyectos_omitidos: $proyectos_omitidos,
         certificacion_exitosa: ($proyectos_error == 0)
       },
-      resultados_por_repositorio: $resultados,
+      resultados_por_repositorio: $resultados_con_progreso,
       errores: ($incidencias | map(select(.severidad == "ERROR"))),
       advertencias: ($incidencias | map(select(.severidad == "ADVERTENCIA")))
     }' > "${JSON_REPORT_FILE}"
 
-  success "Reporte JSON generado: ${JSON_REPORT_FILE}"
+}
+
+generate_excel_report() {
+  local exporter="${SCRIPT_DIRECTORY}/generar_reporte_excel.py"
+  local input_file="${JSON_REPORT_FILE}" output_file="${EXCEL_REPORT_FILE}"
+  if [[ "${PYTHON_PLATFORM}" == "nt" ]]; then
+    exporter="$(cygpath -aw "${exporter}")"
+    input_file="$(cygpath -aw "${input_file}")"
+    output_file="$(cygpath -aw "${output_file}")"
+  fi
+  if ! "${PYTHON_BIN}" "${exporter}" "${input_file}" "${output_file}"; then
+    error "No se pudo generar el reporte Excel. Cierre el archivo si está abierto y revise Python/openpyxl."
+    return 1
+  fi
+  success "Evidencia Excel disponible: ${EXCEL_REPORT_FILE}"
 }
 
 print_summary() {
   generate_json_report
+  generate_excel_report || return 1
 
   printf '\n'
   info "================================================================"
@@ -2050,8 +2095,14 @@ print_summary() {
   info "Proyectos con error: ${FAILED_PROJECTS}"
   info "Proyectos omitidos: ${SKIPPED_PROJECTS}"
   info "Log principal: ${LOG_FILE}"
-  info "Reporte JSON: ${JSON_REPORT_FILE}"
+  info "Reporte Excel: ${EXCEL_REPORT_FILE}"
   info "================================================================"
+
+  info "PORCENTAJE VERIFICADO POR REPOSITORIO (comprobaciones en OK / aplicables)"
+  jq -r '.resultados_por_repositorio[]
+    | "\(.repositorio): \(if .progreso_verificado.porcentaje == null then "N/D" else (.progreso_verificado.porcentaje | tostring) + "%" end) (\(.progreso_verificado.comprobaciones_ok)/\(.progreso_verificado.comprobaciones_aplicables)) - \(.resultado)"' \
+    "${JSON_REPORT_FILE}"
+  info "No mide bytes transferidos. Advertencias y comprobaciones no evaluadas no suman; NO_APLICA se excluye."
 
   if [[ "${FAILED_PROJECTS}" -gt 0 ]]; then
     error "RESULTADO FINAL: CERTIFICACIÓN CON ERRORES."
@@ -2068,6 +2119,9 @@ print_summary() {
 }
 
 main() {
+  local github_login=""
+  local python_candidate=""
+
   require_command bash
   require_command curl
   require_command jq
@@ -2081,9 +2135,26 @@ main() {
   require_command find
   require_command grep
 
+  if [[ -z "${PYTHON_BIN}" ]]; then
+    for python_candidate in python3 python py; do
+      if command -v "${python_candidate}" >/dev/null 2>&1 &&
+         "${python_candidate}" -c 'import sys, openpyxl; assert sys.version_info >= (3, 9)' >/dev/null 2>&1; then
+        PYTHON_BIN="${python_candidate}"
+        break
+      fi
+    done
+  fi
+  [[ -n "${PYTHON_BIN}" ]] || fatal "El reporte Excel requiere Python 3.9+ y openpyxl. Instale: py -m pip install -r requirements-report.txt (Windows) o python3 -m pip install -r requirements-report.txt."
+  require_command "${PYTHON_BIN}"
+  "${PYTHON_BIN}" -c 'import sys, openpyxl; assert sys.version_info >= (3, 9)' >/dev/null 2>&1 ||
+    fatal "PYTHON_BIN debe apuntar a Python 3.9+ con openpyxl instalado."
+  PYTHON_PLATFORM="$("${PYTHON_BIN}" -c 'import os; print(os.name)')"
+  PYTHON_PLATFORM="${PYTHON_PLATFORM//$'\r'/}"
+  [[ "${PYTHON_PLATFORM}" != "nt" ]] || require_command cygpath
+  [[ -f "${SCRIPT_DIRECTORY}/generar_reporte_excel.py" ]] || fatal "No se encontró el exportador generar_reporte_excel.py junto al validador."
+
   [[ -n "${GITLAB_URL}" ]] || fatal "Falta GITLAB_URL."
   [[ -n "${TOKEN_GITLAB}" ]] || fatal "Falta TOKEN_GITLAB."
-  [[ -n "${OWNER}" ]] || fatal "Falta OWNER."
   [[ -n "${TOKEN_GITHUB}" ]] || fatal "Falta TOKEN_GITHUB."
 
   validate_url "GITLAB_URL" "${GITLAB_URL}"
@@ -2136,6 +2207,7 @@ main() {
   GITHUB_API_URL="${GITHUB_API_URL%/}"
 
   WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/gitlab-github-certification.XXXXXX")"
+  JSON_REPORT_FILE="${WORK_ROOT}/reporte-datos.json"
   EVENTS_NDJSON="$(mktemp "${WORK_ROOT}/eventos.XXXXXX.ndjson")"
   RESULTS_NDJSON="$(mktemp "${WORK_ROOT}/resultados.XXXXXX.ndjson")"
 
@@ -2145,7 +2217,6 @@ main() {
   create_askpass_script
 
   info "Inicio de certificación GitLab -> GitHub."
-  info "Organización GitHub: ${OWNER}"
   info "GitLab API: ${GITLAB_URL}"
   info "GitHub API: ${GITHUB_API_URL}"
   info "Grupo GitLab: ${GROUP_GITLAB:-No especificado}"
@@ -2156,7 +2227,7 @@ main() {
   info "Validar miembros: ${MIGRATE_REPOSITORY_MEMBERS}"
   info "Validar pipelines: ${MIGRATE_PIPELINES}"
   info "Log principal: ${LOG_FILE}"
-  info "Reporte JSON final: ${JSON_REPORT_FILE}"
+  info "Reporte Excel final: ${EXCEL_REPORT_FILE}"
 
   if ! request_api "GitLab" "GET" "${GITLAB_URL}/api/v4/user"; then
     fatal "No fue posible conectar con GitLab para validar el token."
@@ -2172,15 +2243,24 @@ main() {
   if ! request_api \
     "GitHub" \
     "GET" \
-    "${GITHUB_API_URL}/orgs/$(url_encode "${OWNER}")"; then
-    fatal "No fue posible conectar con GitHub para validar la organización."
+    "${GITHUB_API_URL}/user"; then
+    fatal "No fue posible conectar con GitHub para validar el token."
   fi
 
   if ! http_status_is_success "${HTTP_STATUS}"; then
-    show_http_error "GitHub" "${GITHUB_API_URL}/orgs/$(url_encode "${OWNER}")"
-    fatal "No fue posible consultar la organización GitHub."
+    show_http_error "GitHub" "${GITHUB_API_URL}/user"
+    fatal "No fue posible validar TOKEN_GITHUB."
   fi
 
+  github_login="$(jq -r '.login // empty' "${HTTP_BODY}")"
+  [[ -n "${github_login}" ]] || fatal "GitHub no devolvió el usuario asociado a TOKEN_GITHUB."
+
+  if [[ -n "${OWNER}" && "${github_login,,}" != "${OWNER,,}" ]]; then
+    warn "OWNER=${OWNER} no coincide con el token; se usará la cuenta personal ${github_login}."
+  fi
+
+  OWNER="${github_login}"
+  info "Cuenta GitHub destino detectada: ${OWNER}"
   success "Acceso GitHub validado."
 
   fetch_gitlab_projects

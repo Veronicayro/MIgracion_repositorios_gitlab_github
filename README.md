@@ -2,7 +2,7 @@
 
 > Script principal: `migrar_repositorios.sh`
 
-Este documento describe la configuración, ejecución y validación del proceso de migración de repositorios desde GitLab hacia una organización de GitHub.
+Este documento describe la configuración, ejecución y validación del proceso de migración de repositorios desde GitLab hacia una cuenta personal de GitHub.
 
 ---
 
@@ -102,7 +102,7 @@ chmod +x validar_integridad_migracion.sh
 
 ## 1. Alcance
 
-El script `migrar_repositorios.sh` realiza una migración de repositorios desde GitLab hacia una organización de GitHub.
+El script `migrar_repositorios.sh` realiza una migración de repositorios desde GitLab hacia una cuenta personal de GitHub.
 
 ### Capacidades incluidas
 
@@ -251,7 +251,6 @@ Estas variables deben estar definidas antes de ejecutar el script.
 |---|---|---|
 | `GITLAB_URL` | URL base del servidor GitLab. | `http://gitlab.bancoexterior.com` |
 | `TOKEN_GITLAB` | Token GitLab con acceso API y permisos de lectura sobre los repositorios. | `glpat-xxxxxxxx` |
-| `OWNER` | Organización de GitHub donde se crearán los repositorios. | `Banco-Exterior-CA` |
 | `TOKEN_GITHUB` | Token GitHub con permisos de creación, administración y escritura en repositorios. | `github_pat_xxxxxxxx` |
 
 Ejemplo:
@@ -259,15 +258,16 @@ Ejemplo:
 ```bash
 export GITLAB_URL="http://gitlab.bancoexterior.com"
 export TOKEN_GITLAB="glpat-xxxxxxxx"
-export OWNER="Banco-Exterior-CA"
 export TOKEN_GITHUB="github_pat_xxxxxxxx"
 ```
+
+El usuario personal de GitHub se detecta automáticamente desde `TOKEN_GITHUB`; no configures `OWNER`. Si quedó definido con el nombre de una organización, el script lo ignora y usa el usuario autenticado.
 
 ---
 
 ## 6. Selección de repositorios
 
-El script permite seleccionar repositorios mediante `GROUP_GITLAB` o `REPOSITORIES_FILE`.
+El script permite seleccionar repositorios mediante `GROUP_GITLAB` o `REPOSITORIES_FILE`. La cuenta personal detectada en GitHub es independiente de esta selección: puedes migrar un grupo de GitLab hacia tu cuenta personal de GitHub.
 
 > [!NOTE]
 > Aunque la variable se denomina `REPOSITORIES_FILE`, su valor **no es una ruta a un archivo**. Recibe una lista de repositorios o IDs separados por coma.
@@ -275,10 +275,15 @@ El script permite seleccionar repositorios mediante `GROUP_GITLAB` o `REPOSITORI
 ### 6.1 Migrar un grupo GitLab
 
 ```bash
-export GROUP_GITLAB="banco-exterior"
+source migracion.env
+unset REPOSITORIES_FILE
+export GROUP_GITLAB="nombre-del-grupo"
+./migrar_repositorios.sh
 ```
 
-El script consulta los proyectos del grupo y también los proyectos de sus subgrupos.
+En Git Bash, reemplaza `nombre-del-grupo` por el grupo que quieras migrar cada vez que ejecutes el proceso. Carga primero `migracion.env`; así el valor que exportes después será el que use el script. `unset REPOSITORIES_FILE` evita que una lista configurada anteriormente tenga prioridad sobre el grupo. El script también consulta los proyectos de los subgrupos y el token de GitLab debe tener acceso al grupo.
+
+Si tus repositorios están directamente bajo tu usuario de GitLab y no dentro de un grupo, usa `REPOSITORIES_FILE` en lugar de `GROUP_GITLAB`.
 
 Si `GROUP_GITLAB` no está definida y `REPOSITORIES_FILE` tampoco, el script consultará todos los repositorios visibles para `TOKEN_GITLAB`.
 
@@ -290,7 +295,7 @@ Si `GROUP_GITLAB` no está definida y `REPOSITORIES_FILE` tampoco, el script con
 Lista de repositorios separados por coma:
 
 ```bash
-export REPOSITORIES_FILE="banco/api-clientes,banco/canales/web,banco/servicios/notificaciones"
+export REPOSITORIES_FILE="mi-usuario/api-clientes,mi-usuario/web,mi-usuario/notificaciones"
 ```
 
 También se pueden usar IDs de proyectos GitLab:
@@ -351,7 +356,7 @@ Estas variables no necesitan ser exportadas si sus valores por defecto son adecu
 
 | Variable | Valor por defecto | Descripción |
 |---|---|---|
-| `GROUP_GITLAB` | Vacío | Grupo GitLab a migrar. Si está vacío, se consultan todos los proyectos visibles. |
+| `GROUP_GITLAB` | Vacío | Grupo GitLab a migrar. Para proyectos personales, déjalo vacío o usa `REPOSITORIES_FILE`. Si está vacío, se consultan todos los proyectos visibles para el token. |
 | `REPOSITORIES_FILE` | Vacío | Lista de repositorios separados por coma. Tiene prioridad sobre `GROUP_GITLAB`. |
 | `GITHUB_API_URL` | `https://api.github.com` | URL de API GitHub. |
 | `ALLOW_MIRROR_OVERWRITE` | `false` | Define si se puede migrar sobre un repositorio GitHub existente. |
@@ -665,8 +670,6 @@ export MEMBER_CONFLICTS_FILE="/opt/migraciones/logs/member-conflicts.tsv"
 
 ```bash
 export GROUP_GITLAB="banco-exterior"
-export OWNER="Banco-Exterior-CA"
-
 export GITLAB_URL="http://gitlab.bancoexterior.com"
 export TOKEN_GITLAB="glpat-xxxxxxxx"
 export TOKEN_GITHUB="github_pat_xxxxxxxx"
@@ -683,8 +686,6 @@ export LFS_MODE="report"
 
 ```bash
 export GROUP_GITLAB="banco-exterior"
-export OWNER="Banco-Exterior-CA"
-
 export GITLAB_URL="http://gitlab.bancoexterior.com"
 export TOKEN_GITLAB="glpat-xxxxxxxx"
 export TOKEN_GITHUB="github_pat_xxxxxxxx"
@@ -712,8 +713,6 @@ export LFS_MODE="report"
 ### 14.3 Configuración para repositorios específicos
 
 ```bash
-export OWNER="Banco-Exterior-CA"
-
 export GITLAB_URL="http://gitlab.bancoexterior.com"
 export TOKEN_GITLAB="glpat-xxxxxxxx"
 export TOKEN_GITHUB="github_pat_xxxxxxxx"
@@ -1019,6 +1018,18 @@ find
 grep
 ```
 
+Para generar el reporte Excel se requiere Python 3.9 o posterior con `openpyxl`. Desde la carpeta `migrate`, instalar una vez:
+
+```bash
+# Windows / Git Bash
+py -m pip install -r requirements-report.txt
+
+# Linux / WSL
+python3 -m pip install -r requirements-report.txt
+```
+
+El validador busca `python3`, `python` o `py` con la dependencia instalada. Se puede seleccionar otro ejecutable mediante `PYTHON_BIN`. El exportador `generar_reporte_excel.py` debe permanecer junto al validador. En Git Bash se usa `cygpath` para ejecutar Python de Windows con las rutas correctas.
+
 Cuando `LFS_MODE=preserve` o `LFS_MODE=migrate`, también se requiere:
 
 ```text
@@ -1043,7 +1054,6 @@ git lfs version
 |---|---|
 | `GITLAB_URL` | URL base de GitLab. |
 | `TOKEN_GITLAB` | Token con acceso API y lectura de los repositorios a validar. |
-| `OWNER` | Organización GitHub destino. |
 | `TOKEN_GITHUB` | Token con permisos para consultar repositorios y configuración asociada. |
 
 Ejemplo:
@@ -1051,7 +1061,6 @@ Ejemplo:
 ```bash
 export GITLAB_URL="http://gitlab.bancoexterior.com"
 export TOKEN_GITLAB="glpat-xxxxxxxx"
-export OWNER="Banco-Exterior-CA"
 export TOKEN_GITHUB="github_pat_xxxxxxxx"
 ```
 
@@ -1133,7 +1142,7 @@ Archivos principales:
 | Archivo | Contenido |
 |---|---|
 | `certificacion.log` | Log completo de ejecución. |
-| `errores-certificacion.json` | Reporte estructurado de resultados, errores y advertencias. |
+| `reporte-migracion.xlsx` | Libro Excel de evidencia con una hoja por repositorio, porcentaje verificado, estados e incidencias. |
 
 ### 18.9 Flujo de certificación por repositorio
 
@@ -1461,6 +1470,12 @@ la misma diferencia se convierte en `ERROR`.
 
 ### 18.21 Estados finales por repositorio
 
+El resumen final y el Excel incluyen un porcentaje verificado por repositorio: comprobaciones en `OK` divididas entre comprobaciones aplicables, con igual peso y redondeo a dos decimales. Por ejemplo, 8 comprobaciones correctas de 10 aplicables representan 80%.
+
+Las advertencias, errores, estados `NO_EVALUADO` y hashes no comparables tras reescritura LFS no suman al porcentaje. Los estados `NO_APLICA*` se excluyen del denominador; si no hay comprobaciones aplicables, se muestra `N/D`. Si el repositorio falla antes de poder certificarse, se muestra 0% verificado, no una afirmación de que esté vacío.
+
+Este indicador mide comprobaciones completas, no bytes, archivos ni elementos individuales dentro de cada componente. Un 100% significa que pasaron todas las comprobaciones aplicables al alcance configurado, no que se hayan validado funcionalidades fuera de ese alcance ni valores de Secrets que GitHub no expone.
+
 | Resultado | Significado |
 |---|---|
 | `CERTIFICADO` | No se detectaron errores ni advertencias relevantes. |
@@ -1494,32 +1509,23 @@ else
 fi
 ```
 
-### 18.23 Reporte JSON
+### 18.23 Reporte Excel
 
-El archivo `errores-certificacion.json` contiene:
+El archivo `reporte-migracion.xlsx` contiene exactamente una hoja por repositorio. Un grupo de tres repositorios genera un solo libro con tres hojas, incluidos los repositorios que fallen antes de terminar la validación.
 
-```text
-metadatos
-resumen
-resultados_por_repositorio
-errores
-advertencias
-```
+Cada hoja muestra:
 
-Ejemplo conceptual:
+| Sección | Contenido |
+|---|---|
+| Identificación | Repositorio, cuenta GitHub, grupo GitLab y fechas. |
+| Porcentaje verificado | Porcentaje y número de comprobaciones correctas frente a las aplicables. |
+| Comprobaciones | Componente, estado técnico, resultado legible y si cuenta en el porcentaje. |
+| Incidencias | Errores, advertencias, etapa, mensaje y evidencia disponible. |
+| Trazabilidad | Resultado, alcance y ruta del log de ejecución. |
 
-```json
-{
-  "resumen": {
-    "total_proyectos": 10,
-    "proyectos_procesados": 10,
-    "proyectos_certificados": 8,
-    "proyectos_con_advertencias": 1,
-    "proyectos_con_error": 1,
-    "certificacion_exitosa": false
-  }
-}
-```
+Los nombres de hojas largos o incompatibles con Excel se ajustan sin perder el nombre original dentro de la hoja. El JSON se usa únicamente como dato temporal interno; la evidencia entregada es el Excel y el log. El archivo también se genera cuando hay errores de certificación; esos errores mantienen el código de salida no cero.
+
+El Excel refleja las comprobaciones que implementa el validador, no certifica campos fuera de su alcance. No muestra ni compara valores de Secrets que GitHub no permite recuperar.
 
 Por repositorio se registran estados para:
 
@@ -1545,7 +1551,6 @@ lfs
 ```bash
 export GITLAB_URL="http://gitlab.bancoexterior.com"
 export TOKEN_GITLAB="glpat-xxxxxxxx"
-export OWNER="Banco-Exterior-CA"
 export TOKEN_GITHUB="github_pat_xxxxxxxx"
 
 export REPOSITORIES_FILE="banco/api-clientes,banco/canales/web"
@@ -1567,7 +1572,6 @@ Esta configuración valida principalmente ramas, tags, referencias, commits, obj
 ```bash
 export GITLAB_URL="http://gitlab.bancoexterior.com"
 export TOKEN_GITLAB="glpat-xxxxxxxx"
-export OWNER="Banco-Exterior-CA"
 export TOKEN_GITHUB="github_pat_xxxxxxxx"
 
 export GROUP_GITLAB="banco-exterior"
@@ -1672,7 +1676,7 @@ Un repositorio puede considerarse migrado cuando:
 - la migración finalizó sin errores bloqueantes;
 - `validar_integridad_migracion.sh` devuelve `CERTIFICADO`; o
 - las advertencias de `CERTIFICADO_CON_ADVERTENCIA` fueron revisadas y aceptadas formalmente;
-- los logs y el JSON de certificación fueron almacenados como evidencia.
+- los logs y el Excel de certificación fueron almacenados como evidencia.
 
 ```text
 Migración ejecutada
